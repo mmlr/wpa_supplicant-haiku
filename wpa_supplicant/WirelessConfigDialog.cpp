@@ -219,6 +219,19 @@ public:
 	}
 
 	virtual void
+	DispatchMessage(BMessage* message, BHandler* handler)
+	{
+		int8 key;
+		if (message->what == B_KEY_DOWN
+			&& message->FindInt8("byte", 0, &key) == B_OK
+			&& key == B_ESCAPE) {
+			PostMessage(kMessageCancel);
+		}
+
+		BWindow::DispatchMessage(message, handler);
+	}
+
+	virtual void
 	MessageReceived(BMessage* message)
 	{
 		switch (message->what) {
