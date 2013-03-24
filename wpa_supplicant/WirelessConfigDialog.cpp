@@ -13,6 +13,7 @@
  */
 
 #include <Button.h>
+#include <CheckBox.h>
 #include <GridLayout.h>
 #include <GridView.h>
 #include <GroupLayout.h>
@@ -63,8 +64,9 @@ public:
 		if (fNetworkName == NULL)
 			return;
 
-		layout->AddItem(fNetworkName->CreateLabelLayoutItem(), 0, 0);
-		layout->AddItem(fNetworkName->CreateTextViewLayoutItem(), 1, 0);
+		int32 row = 0;
+		layout->AddItem(fNetworkName->CreateLabelLayoutItem(), 0, row);
+		layout->AddItem(fNetworkName->CreateTextViewLayoutItem(), 1, row++);
 
 		BPopUpMenu* authMenu = new(std::nothrow) BPopUpMenu("authMode");
 		if (authMenu == NULL)
@@ -82,8 +84,8 @@ public:
 		if (authMenuField == NULL)
 			return;
 
-		layout->AddItem(authMenuField->CreateLabelLayoutItem(), 0, 1);
-		layout->AddItem(authMenuField->CreateMenuBarLayoutItem(), 1, 1);
+		layout->AddItem(authMenuField->CreateLabelLayoutItem(), 0, row);
+		layout->AddItem(authMenuField->CreateMenuBarLayoutItem(), 1, row++);
 
 		fPassword = new(std::nothrow) BTextControl("Password:", "", NULL);
 		if (fPassword == NULL)
@@ -94,8 +96,12 @@ public:
 				"0123456789012345678901234567890123456789") + inset,
 			B_SIZE_UNSET));
 
-		layout->AddItem(fPassword->CreateLabelLayoutItem(), 0, 2);
-		layout->AddItem(layoutItem, 1, 2);
+		layout->AddItem(fPassword->CreateLabelLayoutItem(), 0, row);
+		layout->AddItem(layoutItem, 1, row++);
+
+		fPersist = new(std::nothrow) BCheckBox("Store this configuration");
+		layout->AddItem(BSpaceLayoutItem::CreateGlue(), 0, row);
+		layout->AddView(fPersist, 1, row++);
 
 		BGroupView* buttons = new(std::nothrow) BGroupView(B_HORIZONTAL);
 		if (buttons == NULL)
@@ -170,6 +176,9 @@ public:
 
 		message.RemoveName("password");
 		message.AddString("password", fPassword->Text());
+
+		message.RemoveName("persistent");
+		message.AddBool("persistent", fPersist->Value() != 0);
 	}
 
 private:
@@ -178,6 +187,7 @@ private:
 	BMenuItem* fAuthWEP;
 	BMenuItem* fAuthWPA;
 	BTextControl* fPassword;
+	BCheckBox* fPersist;
 	BButton* fCancelButton;
 	BButton* fOkButton;
 };
