@@ -26,6 +26,10 @@
 #include "scan.h"
 #include "notify.h"
 
+#ifdef __HAIKU__
+#include "notify_haiku.h"
+#endif
+
 int wpas_notify_supplicant_initialized(struct wpa_global *global)
 {
 #ifdef CONFIG_DBUS
@@ -81,6 +85,10 @@ void wpas_notify_state_changed(struct wpa_supplicant *wpa_s,
 
 	/* notify the new DBus API */
 	wpas_dbus_signal_prop_changed(wpa_s, WPAS_DBUS_PROP_STATE);
+
+#ifdef __HAIKU__
+	wpa_supplicant_haiku_notify_state_change(wpa_s, new_state, old_state);
+#endif
 }
 
 

@@ -1876,6 +1876,7 @@ int wpa_config_set(struct wpa_ssid *ssid, const char *var, const char *value,
 }
 
 
+#ifndef NO_CONFIG_WRITE
 /**
  * wpa_config_get_all - Get all options from network configuration
  * @ssid: Pointer to network configuration data
@@ -1935,7 +1936,6 @@ err:
 }
 
 
-#ifndef NO_CONFIG_WRITE
 /**
  * wpa_config_get - Get a variable in network configuration
  * @ssid: Pointer to network configuration data

@@ -579,7 +579,9 @@ OBJS += ../src/eap_peer/eap.o ../src/eap_peer/eap_methods.o
 NEED_EAP_COMMON=y
 ifdef CONFIG_DYNAMIC_EAP_METHODS
 CFLAGS += -DCONFIG_DYNAMIC_EAP_METHODS
+ifneq ($(CONFIG_L2_PACKET), haiku)
 LIBS += -ldl -rdynamic
+endif
 endif
 endif
 
@@ -898,9 +900,21 @@ ifdef TLS_FUNCS
 ifdef CONFIG_SMARTCARD
 ifndef CONFIG_NATIVE_WINDOWS
 ifneq ($(CONFIG_L2_PACKET), freebsd)
+ifneq ($(CONFIG_L2_PACKET), haiku)
 LIBS += -ldl
 endif
 endif
+endif
+endif
+endif
+
+ifeq ($(CONFIG_L2_PACKET), haiku)
+OBJS += WirelessConfigDialog.o
+OBJS += notify_haiku.o
+LIBS += -lnetwork -lbe
+LIBS_c += -lnetwork
+ifeq ($(shell $(CC) -dumpversion | cut -d. -f1), 4)
+LIBS += -lstdc++
 endif
 endif
 
@@ -1270,13 +1284,21 @@ BCHECK=../src/drivers/build.wpa_supplicant
 wpa_priv: $(BCHECK) $(OBJS_priv)
 	$(LDO) $(LDFLAGS) -o wpa_priv $(OBJS_priv) $(LIBS)
 
+ifneq ($(CONFIG_L2_PACKET), haiku)
 wpa_supplicant: .config $(BCHECK) $(OBJS) $(EXTRA_progs)
 	$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
+else
+wpa_supplicant: .config $(BCHECK) $(OBJS) $(EXTRA_progs)
+	$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
+	rc -o wpa_supplicant.rsrc wpa_supplicant.rdef
+	xres -o wpa_supplicant wpa_supplicant.rsrc
+	mimeset -F wpa_supplicant
+endif
 
 eapol_test: .config $(OBJS_t)
 	$(LDO) $(LDFLAGS) -o eapol_test $(OBJS_t) $(LIBS)
 
-preauth_test: .config $(OBJS_t2) 
+preauth_test: .config $(OBJS_t2)
 	$(LDO) $(LDFLAGS) -o preauth_test $(OBJS_t2) $(LIBS)
 
 wpa_passphrase: $(OBJS_p)
@@ -1329,6 +1351,10 @@ endif
 	$(Q)$(CC) -c -o $@ $(CFLAGS) $<
 	@$(E) "  CC " $<
 
+%.o: %.cpp
+	$(Q)$(CC) -c -o $@ $(CFLAGS) $<
+	@$(E) "  CPP " $<
+
 wpa_supplicant.exe: wpa_supplicant
 	mv -f $< $@
 wpa_cli.exe: wpa_cli
@@ -1346,13 +1372,13 @@ windows-bin: $(WINALL)
 	$(STRIP) $(WINALL)
 
 wpa_gui/Makefile:
-	qmake -o wpa_gui/Makefile wpa_gui/wpa_gui.pro 
+	qmake -o wpa_gui/Makefile wpa_gui/wpa_gui.pro
 
 wpa_gui: wpa_gui/Makefile
 	$(MAKE) -C wpa_gui
 
 wpa_gui-qt4/Makefile:
-	qmake -o wpa_gui-qt4/Makefile wpa_gui-qt4/wpa_gui.pro 
+	qmake -o wpa_gui-qt4/Makefile wpa_gui-qt4/wpa_gui.pro
 
 wpa_gui-qt4/lang/wpa_gui_de.qm: wpa_gui-qt4/lang/wpa_gui_de.ts
 	lrelease wpa_gui-qt4/wpa_gui.pro
@@ -1375,6 +1401,6 @@ clean:
 	$(MAKE) -C ../src clean
 	$(MAKE) -C dbus clean
 	rm -f core *~ *.o *.d eap_*.so $(ALL) $(WINALL) eapol_test preauth_test
-	rm -f wpa_priv
+	rm -f wpa_priv *.rsrc
 
 -include $(OBJS:%.o=%.d)

@@ -59,6 +59,14 @@ static inline unsigned int bswap_32(unsigned int v)
 }
 #endif /* __APPLE__ */
 
+#if defined(__HAIKU__)
+#include <endian.h>
+#include <net/if.h>
+#define bswap_16 __swap_int16
+#define bswap_32 __swap_int32
+#define bswap_64 __swap_int64
+#endif /* __HAIKU__ */
+
 #ifdef CONFIG_TI_COMPILER
 #define __BIG_ENDIAN 4321
 #define __LITTLE_ENDIAN 1234

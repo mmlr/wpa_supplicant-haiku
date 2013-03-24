@@ -135,9 +135,9 @@ static int os_daemon(int nochdir, int noclose)
 
 int os_daemonize(const char *pid_file)
 {
-#ifdef __uClinux__
+#if defined(__uClinux__) || defined(__HAIKU__)
 	return -1;
-#else /* __uClinux__ */
+#else /* __uClinux__ || __HAIKU__ */
 	if (os_daemon(0, 0)) {
 		perror("daemon");
 		return -1;
@@ -152,7 +152,7 @@ int os_daemonize(const char *pid_file)
 	}
 
 	return -0;
-#endif /* __uClinux__ */
+#endif /* __uClinux__ || __HAIKU__ */
 }
 
 
