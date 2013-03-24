@@ -17,6 +17,7 @@
 #include <MessageQueue.h>
 #include <MessageRunner.h>
 #include <NetworkDevice.h>
+#include <NetworkRoster.h>
 #include <ObjectList.h>
 #include <String.h>
 
@@ -47,6 +48,7 @@ extern "C" {
 
 
 static const uint32 kMsgJoinTimeout = 'jnto';
+static const uint32 kMsgAddPersistentNetwork = 'adpn';
 
 
 typedef	bool (*StateChangeCallback)(const wpa_supplicant *interface,
@@ -128,6 +130,10 @@ static	void					_EventLoopProcessEvents(int sock,
 		status_t				_LeaveNetwork(BMessage *message);
 
 		status_t				_NotifyNetworkEvent(BMessage *message);
+
+static	void					_SuccessfullyJoined(
+									const wpa_supplicant *interface,
+									const BMessage &joinRequest);
 
 static	bool					_InterfaceStateChangeCallback(
 									const wpa_supplicant *interface,
@@ -604,6 +610,104 @@ WPASupplicantApp::_NotifyNetworkEvent(BMessage *message)
 }
 
 
+void
+WPASupplicantApp::_SuccessfullyJoined(const wpa_supplicant *interface,
+	const BMessage &joinRequest)
+{
+	// We successfully connected with this configuration, store the config,
+	// if requested, by adding a persistent network on the network device.
+	if (!joinRequest.FindBool("persistent"))
+		return;
+
+	wpa_ssid *networkConfig = interface->current_ssid;
+	if (networkConfig == NULL)
+		return;
+
+	wireless_network network;
+	memset(network.name, 0, sizeof(network.name));
+	memcpy(network.name, networkConfig->ssid,
+		min_c(sizeof(network.name), networkConfig->ssid_len));
+
+	//network.address.SetToLinkLevel((uint8 *)interface->bssid, ETH_ALEN);
+		// TODO: Decide if we want to do this, it limits the network to
+		// a specific base station instead of a "service set" that might
+		// consist of more than one base station. On the other hand it makes
+		// the network unique so the right one is connected in case of name
+		// conflicts. It should probably be used as a hint, as in "preferred"
+		// base station.
+
+	if (joinRequest.FindUInt32("authentication",
+			&network.authentication_mode) != B_OK) {
+		return;
+	}
+
+	if (network.authentication_mode > B_NETWORK_AUTHENTICATION_NONE) {
+		const char *password = NULL;
+		if (joinRequest.FindString("password", &password) != B_OK)
+			return;
+
+		// TODO: Store the password with the corresponding association into
+		// the eventual keystore...
+	}
+
+	switch (interface->pairwise_cipher) {
+		case WPA_CIPHER_NONE:
+			network.cipher = B_NETWORK_CIPHER_NONE;
+			break;
+		case WPA_CIPHER_TKIP:
+			network.cipher = B_NETWORK_CIPHER_TKIP;
+			break;
+		case WPA_CIPHER_CCMP:
+			network.cipher = B_NETWORK_CIPHER_CCMP;
+			break;
+	}
+
+	switch (interface->group_cipher) {
+		case WPA_CIPHER_NONE:
+			network.group_cipher = B_NETWORK_CIPHER_NONE;
+			break;
+		case WPA_CIPHER_WEP40:
+			network.group_cipher = B_NETWORK_CIPHER_WEP_40;
+			break;
+		case WPA_CIPHER_WEP104:
+			network.group_cipher = B_NETWORK_CIPHER_WEP_104;
+			break;
+		case WPA_CIPHER_TKIP:
+			network.group_cipher = B_NETWORK_CIPHER_TKIP;
+			break;
+		case WPA_CIPHER_CCMP:
+			network.group_cipher = B_NETWORK_CIPHER_CCMP;
+			break;
+	}
+
+	switch (interface->key_mgmt) {
+		case WPA_KEY_MGMT_IEEE8021X:
+			network.key_mode = B_KEY_MODE_IEEE802_1X;
+			break;
+		case WPA_KEY_MGMT_PSK:
+			network.key_mode = B_KEY_MODE_PSK;
+			break;
+		case WPA_KEY_MGMT_NONE:
+			network.key_mode = B_KEY_MODE_NONE;
+			break;
+		case WPA_KEY_MGMT_FT_IEEE8021X:
+			network.key_mode = B_KEY_MODE_FT_IEEE802_1X;
+			break;
+		case WPA_KEY_MGMT_FT_PSK:
+			network.key_mode = B_KEY_MODE_FT_PSK;
+			break;
+		case WPA_KEY_MGMT_IEEE8021X_SHA256:
+			network.key_mode = B_KEY_MODE_IEEE802_1X_SHA256;
+			break;
+		case WPA_KEY_MGMT_PSK_SHA256:
+			network.key_mode = B_KEY_MODE_PSK_SHA256;
+			break;
+	}
+
+	BNetworkRoster::Default().AddPersistentNetwork(network);
+}
+
+
 bool
 WPASupplicantApp::_InterfaceStateChangeCallback(const wpa_supplicant *interface,
 	BMessage *message, void *data)
@@ -629,6 +733,7 @@ WPASupplicantApp::_InterfaceStateChangeCallback(const wpa_supplicant *interface,
 				if (originalMessage->what != kMsgWPAJoinNetwork)
 					return false;
 
+				_SuccessfullyJoined(interface, *originalMessage);
 				result = B_OK;
 				break;
 			}

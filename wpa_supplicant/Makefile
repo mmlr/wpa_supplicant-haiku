@@ -911,7 +911,7 @@ endif
 ifeq ($(CONFIG_L2_PACKET), haiku)
 OBJS += WirelessConfigDialog.o
 OBJS += notify_haiku.o
-LIBS += -lnetwork -lbe
+LIBS += -lnetwork -lbe -lbnetapi
 LIBS_c += -lnetwork
 ifeq ($(shell $(CC) -dumpversion | cut -d. -f1), 4)
 LIBS += -lstdc++
