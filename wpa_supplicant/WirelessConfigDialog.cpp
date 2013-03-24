@@ -124,9 +124,15 @@ public:
 	}
 
 	void
-	SetUp(BString& networkName, uint32 authMode, BString& password)
+	SetUp(const BMessage& message)
 	{
-		fNetworkName->SetText(networkName);
+		BString networkName;
+		if (message.FindString("name", &networkName) == B_OK)
+			fNetworkName->SetText(networkName);
+
+		uint32 authMode;
+		if (message.FindUInt32("authentication", &authMode) != B_OK)
+			authMode = B_NETWORK_AUTHENTICATION_NONE;
 
 		switch (authMode) {
 			default:
@@ -142,21 +148,28 @@ public:
 				break;
 		}
 
-		fPassword->SetText(password);
+		BString password;
+		if (message.FindString("password", &password) == B_OK)
+			fPassword->SetText(password);
 	}
 
 	void
-	Complete(BString& networkName, uint32& authMode, BString& password)
+	Complete(BMessage& message)
 	{
-		networkName = fNetworkName->Text();
+		message.RemoveName("name");
+		message.AddString("name", fNetworkName->Text());
 
-		authMode = B_NETWORK_AUTHENTICATION_NONE;
+		uint32 authMode = B_NETWORK_AUTHENTICATION_NONE;
 		if (fAuthWEP->IsMarked())
 			authMode = B_NETWORK_AUTHENTICATION_WEP;
 		else if (fAuthWPA->IsMarked())
 			authMode = B_NETWORK_AUTHENTICATION_WPA;
 
-		password = fPassword->Text();
+		message.RemoveName("authentication");
+		message.AddUInt32("authentication", authMode);
+
+		message.RemoveName("password");
+		message.AddString("password", fPassword->Text());
 	}
 
 private:
@@ -220,9 +233,10 @@ public:
 	}
 
 	status_t
-	WaitForDialog(BString& networkName, uint32& authMode, BString& password)
+	WaitForDialog(BMessage& message)
 	{
-		fConfigView->SetUp(networkName, authMode, password);
+		
+		fConfigView->SetUp(message);
 
 		CenterOnScreen();
 		Show();
@@ -230,7 +244,7 @@ public:
 		while (acquire_sem(fDoneSem) == B_INTERRUPTED);
 
 		status_t result = fResult;
-		fConfigView->Complete(networkName, authMode, password);
+		fConfigView->Complete(message);
 
 		LockLooper();
 		Quit();
@@ -245,13 +259,12 @@ private:
 
 
 status_t
-wireless_config_dialog(BString& networkName, uint32& authMode,
-	BString& password)
+wireless_config_dialog(BMessage& message)
 {
 	WirelessConfigWindow* configWindow
 		= new(std::nothrow) WirelessConfigWindow(BRect(100, 100, 200, 200));
 	if (configWindow == NULL)
 		return B_NO_MEMORY;
 
-	return configWindow->WaitForDialog(networkName, authMode, password);
+	return configWindow->WaitForDialog(message);
 }

@@ -234,24 +234,13 @@ WPASupplicantApp::MessageReceived(BMessage *message)
 				|| (authMode > B_NETWORK_AUTHENTICATION_NONE
 					&& !message->HasString("password"))) {
 
-				BString password = message->FindString("password");
-				BString networkName = message->FindString("name");
-
-				status = wireless_config_dialog(networkName, authMode,
-					password);
+				status = wireless_config_dialog(*message);
 				if (status != B_OK) {
 					BMessage reply;
 					reply.AddInt32("status", status);
 					message->SendReply(&reply);
 					return;
 				}
-
-				message->RemoveName("authentication");
-				message->AddUInt32("authentication", authMode);
-				message->RemoveName("password");
-				message->AddString("password", password);
-				message->RemoveName("name");
-				message->AddString("name", networkName);
 			}
 
 			_EnqueueAndNotify(DetachCurrentMessage());
