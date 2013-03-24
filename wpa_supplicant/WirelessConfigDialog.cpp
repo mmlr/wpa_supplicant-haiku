@@ -119,6 +119,8 @@ public:
 	{
 		fCancelButton->SetTarget(Window());
 		fOkButton->SetTarget(Window());
+		fOkButton->MakeDefault(true);
+		fPassword->MakeFocus(true);
 	}
 
 	void
