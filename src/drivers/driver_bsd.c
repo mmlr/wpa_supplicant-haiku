@@ -611,6 +611,7 @@ bsd_set_opt_ie(void *priv, const u8 *ie, size_t ie_len)
 	return 0;
 }
 
+#ifndef __HAIKU__
 static int
 rtbuf_len(void)
 {
@@ -626,6 +627,7 @@ rtbuf_len(void)
 
 	return len;
 }
+#endif // !__HAIKU__
 
 #ifdef HOSTAPD
 

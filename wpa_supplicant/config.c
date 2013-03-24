@@ -2120,6 +2120,7 @@ int wpa_config_set_quoted(struct wpa_ssid *ssid, const char *var,
 }
 
 
+#ifndef NO_CONFIG_WRITE
 /**
  * wpa_config_get_all - Get all options from network configuration
  * @ssid: Pointer to network configuration data
@@ -2256,6 +2257,7 @@ char * wpa_config_get_no_key(struct wpa_ssid *ssid, const char *var)
 
 	return NULL;
 }
+#endif // !NO_CONFIG_WRITE
 
 
 /**

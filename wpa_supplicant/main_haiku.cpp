@@ -571,7 +571,7 @@ WPASupplicantApp::_LeaveNetwork(BMessage *message)
 	if (interface == NULL)
 		return B_ENTRY_NOT_FOUND;
 
-	if (wpa_supplicant_remove_iface(fWPAGlobal, interface) != 0)
+	if (wpa_supplicant_remove_iface(fWPAGlobal, interface, 0) != 0)
 		return B_ERROR;
 
 	return B_OK;
