@@ -1,6 +1,6 @@
 /*
  * wpa_gui - WpaGui class
- * Copyright (c) 2005-2010, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2005-2011, Jouni Malinen <j@w1.fi>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -12,16 +12,12 @@
  * See README and COPYING for more details.
  */
 
-#ifdef __MINGW32__
-/* Need to get getopt() */
-#include <unistd.h>
-#endif
-
 #ifdef CONFIG_NATIVE_WINDOWS
 #include <windows.h>
 #endif /* CONFIG_NATIVE_WINDOWS */
 
 #include <cstdio>
+#include <unistd.h>
 #include <QMessageBox>
 #include <QCloseEvent>
 #include <QImageReader>
@@ -659,6 +655,13 @@ void WpaGui::updateNetworks()
 			break;
 		*flags++ = '\0';
 
+		if (strstr(flags, "[DISABLED][P2P-PERSISTENT]")) {
+			if (last)
+				break;
+			start = end + 1;
+			continue;
+		}
+
 		QString network(id);
 		network.append(": ");
 		network.append(ssid);
@@ -712,7 +715,7 @@ void WpaGui::helpContents()
 void WpaGui::helpAbout()
 {
 	QMessageBox::about(this, "wpa_gui for wpa_supplicant",
-			   "Copyright (c) 2003-2010,\n"
+			   "Copyright (c) 2003-2011,\n"
 			   "Jouni Malinen <j@w1.fi>\n"
 			   "and contributors.\n"
 			   "\n"
@@ -896,6 +899,15 @@ void WpaGui::processMsg(char *msg)
 	} else if (str_match(pos, WPS_EVENT_AP_AVAILABLE_PIN)) {
 		wpsStatusText->setText(tr("WPS AP with recently selected "
 					  "registrar"));
+		if (textStatus->text() == "INACTIVE" ||
+		    textStatus->text() == "DISCONNECTED")
+			wpaguiTab->setCurrentWidget(wpsTab);
+	} else if (str_match(pos, WPS_EVENT_AP_AVAILABLE_AUTH)) {
+		showTrayMessage(QSystemTrayIcon::Information, 3,
+				"Wi-Fi Protected Setup (WPS) AP\n"
+				"indicating this client is authorized.");
+		wpsStatusText->setText("WPS AP indicating this client is "
+				       "authorized");
 		if (textStatus->text() == "INACTIVE" ||
 		    textStatus->text() == "DISCONNECTED")
 			wpaguiTab->setCurrentWidget(wpsTab);
