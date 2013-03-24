@@ -258,7 +258,9 @@ WPASupplicantApp::MessageReceived(BMessage *message)
 
 		case B_NETWORK_MONITOR:
 		{
-			_EnqueueAndNotify(DetachCurrentMessage());
+			BMessage *copy = new BMessage();
+			*copy = *message;
+			_EnqueueAndNotify(copy);
 			return;
 		}
 
