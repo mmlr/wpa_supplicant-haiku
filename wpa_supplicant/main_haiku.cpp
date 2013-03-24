@@ -141,6 +141,9 @@ static	bool					_InterfaceStateChangeCallback(
 									StateChangeCallback callback, void *data);
 		void					_NotifyInterfaceStateChanged(BMessage *message);
 
+static	void					_SendReplyIfNeeded(BMessage &message,
+									status_t status);
+
 		status_t				fInitStatus;
 		thread_id				fSupplicantThread;
 		BMessageQueue			fEventQueue;
@@ -236,9 +239,7 @@ WPASupplicantApp::MessageReceived(BMessage *message)
 
 				status = wireless_config_dialog(*message);
 				if (status != B_OK) {
-					BMessage reply;
-					reply.AddInt32("status", status);
-					message->SendReply(&reply);
+					_SendReplyIfNeeded(*message, status);
 					return;
 				}
 			}
@@ -397,12 +398,8 @@ WPASupplicantApp::_EventLoopProcessEvents(int sock, void *eventLoopContext,
 				break;
 		}
 
-		if (needsReply) {
-			BMessage reply;
-			reply.AddInt32("status", status);
-			message->SendReply(&reply);
-		}
-
+		if (needsReply)
+			_SendReplyIfNeeded(*message, status);
 		if (deleteMessage)
 			delete message;
 	}
@@ -648,9 +645,7 @@ WPASupplicantApp::_InterfaceStateChangeCallback(const wpa_supplicant *interface,
 		}
 	}
 
-	BMessage reply;
-	reply.AddInt32("status", result);
-	originalMessage->SendReply(&reply);
+	_SendReplyIfNeeded(*originalMessage, result);
 	delete originalMessage;
 	return true;
 }
@@ -721,6 +716,18 @@ WPASupplicantApp::_NotifyInterfaceStateChanged(BMessage *message)
 	}
 
 	fWatchingEntryListLocker.Unlock();
+}
+
+
+void
+WPASupplicantApp::_SendReplyIfNeeded(BMessage &message, status_t status)
+{
+	if (!message.IsSourceWaiting())
+		return;
+
+	BMessage reply;
+	reply.AddInt32("status", status);
+	message.SendReply(&reply);
 }
 
 
