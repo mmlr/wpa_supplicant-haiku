@@ -299,9 +299,12 @@ bsd_ctrl_iface(void *priv, int enable)
 		perror("ioctl[SIOCSIFFLAGS]");
 		return -1;
 	}
-#endif
 
 	return 0;
+#else /* !__HAIKU__ */
+	return set80211var(priv, enable ? IEEE80211_IOC_HAIKU_COMPAT_WLAN_UP
+			: IEEE80211_IOC_HAIKU_COMPAT_WLAN_DOWN, NULL, 0);
+#endif /* __HAIKU__ */
 }
 
 static int
