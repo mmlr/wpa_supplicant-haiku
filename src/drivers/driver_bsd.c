@@ -71,7 +71,9 @@ struct bsd_driver_data {
 
 	int	sock;			/* open socket for 802.11 ioctls */
 	struct l2_packet_data *sock_xmit;/* raw packet xmit socket */
+#ifndef __HAIKU__
 	int	route;			/* routing socket for events */
+#endif
 	char	ifname[IFNAMSIZ+1];	/* interface name */
 	unsigned int ifindex;		/* interface index */
 	void	*ctx;
@@ -1581,7 +1583,9 @@ wpa_driver_bsd_deinit(void *priv)
 
 	if (drv->sock_xmit != NULL)
 		l2_packet_deinit(drv->sock_xmit);
+#ifndef __HAIKU__
 	(void) close(drv->route);		/* ioctl socket */
+#endif
 	(void) close(drv->sock);		/* event socket */
 	os_free(drv);
 }
