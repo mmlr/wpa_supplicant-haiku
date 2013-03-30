@@ -48,7 +48,6 @@ extern "C" {
 
 
 static const uint32 kMsgJoinTimeout = 'jnto';
-static const uint32 kMsgAddPersistentNetwork = 'adpn';
 
 
 typedef	bool (*StateChangeCallback)(const wpa_supplicant *interface,
