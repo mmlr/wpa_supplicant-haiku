@@ -215,7 +215,13 @@ void l2_packet_deinit(struct l2_packet_data *l2)
 
 	if (l2->rx_fd >= 0) {
 		eloop_unregister_read_sock(l2->rx_fd);
-		/* TODO: close connection */
+
+		close(l2->rx_fd);
+		if (l2->rx_fd != l2->tx_fd) {
+			/* we aren't bound to the protocol and use two different sockets
+				for sending and receiving */
+			close(l2->rx_fd);
+		}
 	}
 
 	os_free(l2);
