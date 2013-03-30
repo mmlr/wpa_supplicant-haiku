@@ -1,0 +1,6 @@
+*.d
+*.o
+*.rsrc
+/wpa_supplicant/wpa_cli
+/wpa_supplicant/wpa_passphrase
+/wpa_supplicant/wpa_supplicant
