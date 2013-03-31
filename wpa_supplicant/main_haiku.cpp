@@ -61,9 +61,6 @@ public:
 									StateChangeCallback callback,
 									void *data);
 
-		bool					Match(const wpa_supplicant *interface,
-									StateChangeCallback callback,
-									void *data);
 
 		bool					MessageReceived(
 									const wpa_supplicant *interface,
@@ -83,14 +80,6 @@ StateChangeWatchingEntry::StateChangeWatchingEntry(
 	fCallback(callback),
 	fData(data)
 {
-}
-
-
-bool
-StateChangeWatchingEntry::Match(const wpa_supplicant *interface,
-	StateChangeCallback callback, void *data)
-{
-	return fInterface == interface && fCallback == callback && fData == data;
 }
 
 
@@ -139,9 +128,6 @@ static	bool					_InterfaceStateChangeCallback(
 									BMessage *message, void *data);
 
 		status_t				_StartWatchingInterfaceChanges(
-									const wpa_supplicant *interface,
-									StateChangeCallback callback, void *data);
-		status_t				_StopWatchingInterfaceChanges(
 									const wpa_supplicant *interface,
 									StateChangeCallback callback, void *data);
 		void					_NotifyInterfaceStateChanged(BMessage *message);
@@ -270,33 +256,9 @@ WPASupplicantApp::MessageReceived(BMessage *message)
 		}
 
 		case kMsgSupplicantStateChanged:
-		{
-			_NotifyInterfaceStateChanged(message);
-			return;
-		}
-
 		case kMsgJoinTimeout:
 		{
-			const wpa_supplicant *interface;
-			if (message->FindPointer("interface", (void **)&interface) != B_OK)
-				return;
-
-			StateChangeCallback callback;
-			if (message->FindPointer("callback", (void **)&callback) != B_OK)
-				return;
-
-			void *data;
-			if (message->FindPointer("data", (void **)&data) != B_OK)
-				return;
-
-			if (_StopWatchingInterfaceChanges(interface, callback, data)
-					== B_OK) {
-				// The watch entry was still there, so no reply has been sent
-				// yet. We do that now by calling the callback with the timeout
-				// message.
-				callback(interface, message, data);
-			}
-
+			_NotifyInterfaceStateChanged(message);
 			return;
 		}
 	}
@@ -547,11 +509,12 @@ WPASupplicantApp::_JoinNetwork(BMessage *message)
 	// Use a message runner to return a timeout and stop watching after a while
 	BMessage timeout(kMsgJoinTimeout);
 	timeout.AddPointer("interface", interface);
-	timeout.AddPointer("callback", (void *)_InterfaceStateChangeCallback);
-	timeout.AddPointer("data", message);
 
 	BMessageRunner::StartSending(be_app_messenger, &timeout,
 		15 * 1000 * 1000, 1);
+		// Note that we don't need to cancel this. If joining works before the
+		// timeout happens, it will take the StateChangeWatchingEntry with it
+		// and the timeout message won't match anything and be discarded.
 
 	return B_OK;
 }
@@ -779,27 +742,6 @@ WPASupplicantApp::_StartWatchingInterfaceChanges(
 
 	fWatchingEntryListLocker.Unlock();
 	return result;
-}
-
-
-status_t
-WPASupplicantApp::_StopWatchingInterfaceChanges(
-	const wpa_supplicant *interface, StateChangeCallback callback, void *data)
-{
-	if (!fWatchingEntryListLocker.Lock())
-		return B_ERROR;
-
-	bool found = false;
-	for (int32 i = 0; i < fWatchingEntryList.CountItems(); i++) {
-		if (fWatchingEntryList.ItemAt(i)->Match(interface, callback, data)) {
-			delete fWatchingEntryList.RemoveItemAt(i);
-			found = true;
-			i--;
-		}
-	}
-
-	fWatchingEntryListLocker.Unlock();
-	return found ? B_OK : B_ENTRY_NOT_FOUND;
 }
 
 
