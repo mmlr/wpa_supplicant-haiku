@@ -13,6 +13,7 @@
  */
 
 #include <Application.h>
+#include <KeyStore.h>
 #include <Locker.h>
 #include <MessageQueue.h>
 #include <MessageRunner.h>
@@ -48,6 +49,7 @@ extern "C" {
 
 
 static const uint32 kMsgJoinTimeout = 'jnto';
+static const char *kWPASupplicantKeyring = "wpa_supplicant";
 
 
 typedef	bool (*StateChangeCallback)(const wpa_supplicant *interface,
@@ -608,8 +610,12 @@ WPASupplicantApp::_SuccessfullyJoined(const wpa_supplicant *interface,
 		if (joinRequest.FindString("password", &password) != B_OK)
 			return;
 
-		// TODO: Store the password with the corresponding association into
-		// the eventual keystore...
+		BString networkName(network.name, sizeof(network.name));
+		BPasswordKey key(password, B_KEY_PURPOSE_NETWORK, networkName);
+
+		BKeyStore keyStore;
+		keyStore.AddKeyring(kWPASupplicantKeyring);
+		keyStore.AddKey(kWPASupplicantKeyring, key);
 	}
 
 	switch (interface->pairwise_cipher) {
