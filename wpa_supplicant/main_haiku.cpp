@@ -116,6 +116,8 @@ static	void					_EventLoopProcessEvents(int sock,
 		status_t				_EnqueueAndNotify(BMessage *message);
 		status_t				_NotifyEventLoop();
 
+		bool					_CheckAskForConfig(BMessage *message);
+
 		status_t				_JoinNetwork(BMessage *message);
 		status_t				_LeaveNetwork(BMessage *message);
 
@@ -224,13 +226,8 @@ WPASupplicantApp::MessageReceived(BMessage *message)
 	switch (message->what) {
 		case kMsgWPAJoinNetwork:
 		{
-			uint32 authMode = B_NETWORK_AUTHENTICATION_NONE;
-			status_t status = message->FindUInt32("authentication", &authMode);
-			if (status != B_OK || !message->HasString("name")
-				|| (authMode > B_NETWORK_AUTHENTICATION_NONE
-					&& !message->HasString("password"))) {
-
-				status = wireless_config_dialog(*message);
+			if (_CheckAskForConfig(message)) {
+				status_t status = wireless_config_dialog(*message);
 				if (status != B_OK) {
 					_SendReplyIfNeeded(*message, status);
 					return;
@@ -376,6 +373,38 @@ WPASupplicantApp::_EventLoopProcessEvents(int sock, void *eventLoopContext,
 	}
 
 	queue.Unlock();
+}
+
+
+bool
+WPASupplicantApp::_CheckAskForConfig(BMessage *message)
+{
+	if (!message->HasString("name"))
+		return true;
+
+	uint32 authMode = B_NETWORK_AUTHENTICATION_NONE;
+	if (message->FindUInt32("authentication", &authMode) != B_OK)
+		return true;
+
+	if (authMode <= B_NETWORK_AUTHENTICATION_NONE
+		|| message->HasString("password")) {
+		return false;
+	}
+
+	// Try looking up the password in the keystore.
+	const char *name = message->FindString("name");
+
+	// TODO: Use the bssid as an optional secondary identifier to allow for
+	// overlapping network names.
+	BPasswordKey key;
+	BKeyStore keyStore;
+	if (keyStore.GetKey(kWPASupplicantKeyring, B_KEY_TYPE_PASSWORD,
+			name, key) != B_OK) {
+		return true;
+	}
+
+	message->AddString("password", key.Password());
+	return false;
 }
 
 
