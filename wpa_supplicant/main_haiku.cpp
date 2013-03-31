@@ -403,12 +403,15 @@ WPASupplicantApp::_JoinNetwork(BMessage *message)
 		// Disable everything
 		wpa_supplicant_disable_network(interface, NULL);
 
-		// Try to remove any previous network
-		wpa_ssid *network = wpa_config_get_network(interface->conf, 0);
-		if (network != NULL) {
+		// Try to remove any existing network
+		while (true) {
+			wpa_ssid *network = wpa_config_get_network(interface->conf, 0);
+			if (network == NULL)
+				break;
+
 			wpas_notify_network_removed(interface, network);
 			wpa_config_remove_network(interface->conf, network->id);
-		}		
+		}
 	}
 
 	const char *networkName = NULL;
