@@ -126,6 +126,8 @@ static	void					_EventLoopProcessEvents(int sock,
 static	void					_SuccessfullyJoined(
 									const wpa_supplicant *interface,
 									const BMessage &joinRequest);
+static	void					_FailedToJoin(const wpa_supplicant *interface,
+									const BMessage &joinRequest);
 
 static	bool					_InterfaceStateChangeCallback(
 									const wpa_supplicant *interface,
@@ -721,6 +723,21 @@ WPASupplicantApp::_SuccessfullyJoined(const wpa_supplicant *interface,
 }
 
 
+void
+WPASupplicantApp::_FailedToJoin(const wpa_supplicant *interface,
+	const BMessage &joinRequest)
+{
+	BMessage leaveRequest = joinRequest;
+	leaveRequest.what = kMsgWPALeaveNetwork;
+	be_app->PostMessage(&leaveRequest);
+
+	BMessage newJoinRequest = joinRequest;
+	newJoinRequest.AddString("error", "Failed to join network");
+	newJoinRequest.AddBool("forceDialog", true);
+	be_app->PostMessage(&newJoinRequest);
+}
+
+
 bool
 WPASupplicantApp::_InterfaceStateChangeCallback(const wpa_supplicant *interface,
 	BMessage *message, void *data)
@@ -737,9 +754,10 @@ WPASupplicantApp::_InterfaceStateChangeCallback(const wpa_supplicant *interface,
 
 	int32 newState;
 	status_t result = B_ERROR;
-	if (message->what == kMsgJoinTimeout)
+	if (message->what == kMsgJoinTimeout) {
+		_FailedToJoin(interface, *originalMessage);
 		result = B_TIMED_OUT;
-	else if (message->FindInt32("newState", &newState) == B_OK) {
+	} else if (message->FindInt32("newState", &newState) == B_OK) {
 		switch (newState) {
 			case WPA_COMPLETED:
 			{
