@@ -379,6 +379,10 @@ WPASupplicantApp::_EventLoopProcessEvents(int sock, void *eventLoopContext,
 bool
 WPASupplicantApp::_CheckAskForConfig(BMessage *message)
 {
+	bool force = false;
+	if (message->FindBool("forceDialog", &force) == B_OK && force)
+		return true;
+
 	if (!message->HasString("name"))
 		return true;
 
@@ -524,6 +528,15 @@ WPASupplicantApp::_JoinNetwork(BMessage *message)
 				// We need to actually "apply" the PSK
 				wpa_config_update_psk(network);
 			}
+		}
+
+		if (result != 0) {
+			// The key format is invalid, we need to ask for another password.
+			BMessage newJoinRequest = *message;
+			newJoinRequest.RemoveName("password");
+			newJoinRequest.AddString("error", "Password format invalid");
+			newJoinRequest.AddBool("forceDialog", true);
+			PostMessage(&newJoinRequest);
 		}
 	}
 
