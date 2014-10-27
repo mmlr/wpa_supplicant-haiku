@@ -1850,6 +1850,7 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 		params.fixed_bssid = 1;
 	}
 
+#ifdef HOSTAPD
 	if (ssid->mode == WPAS_MODE_IBSS && ssid->frequency > 0 &&
 	    params.freq.freq == 0) {
 		enum hostapd_hw_mode hw_mode;
@@ -1868,6 +1869,7 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 			}
 		}
 	}
+#endif
 
 	if (ssid->mode == WPAS_MODE_IBSS) {
 		if (ssid->beacon_int)
