@@ -41,6 +41,7 @@ enum wpas_dbus_bss_prop {
 	WPAS_DBUS_BSS_PROP_RSN,
 	WPAS_DBUS_BSS_PROP_WPS,
 	WPAS_DBUS_BSS_PROP_IES,
+	WPAS_DBUS_BSS_PROP_AGE,
 };
 
 #define WPAS_DBUS_OBJECT_PATH_MAX 150
@@ -78,10 +79,6 @@ enum wpas_dbus_bss_prop {
 
 #define WPAS_DBUS_NEW_P2P_PEERS_PART	"Peers"
 #define	WPAS_DBUS_NEW_IFACE_P2P_PEER WPAS_DBUS_NEW_INTERFACE ".Peer"
-
-#define WPAS_DBUS_NEW_P2P_GROUPMEMBERS_PART	"Members"
-#define	WPAS_DBUS_NEW_IFACE_P2P_GROUPMEMBER \
-	WPAS_DBUS_NEW_INTERFACE ".GroupMember"
 
 /* Top-level Errors */
 #define WPAS_DBUS_ERROR_UNKNOWN_ERROR \
@@ -177,6 +174,8 @@ int wpas_dbus_unregister_peer(struct wpa_supplicant *wpa_s,
 				  const u8 *dev_addr);
 void wpas_dbus_signal_peer_device_lost(struct wpa_supplicant *wpa_s,
 					   const u8 *dev_addr);
+void wpas_dbus_signal_peer_groups_changed(struct wpa_supplicant *wpa_s,
+					  const u8 *dev_addr);
 void wpas_dbus_signal_p2p_group_removed(struct wpa_supplicant *wpa_s,
 					const char *role);
 void wpas_dbus_signal_p2p_provision_discovery(struct wpa_supplicant *wpa_s,
@@ -201,10 +200,6 @@ int wpas_dbus_unregister_persistent_group(struct wpa_supplicant *wpa_s,
 					  int nid);
 void wpas_dbus_signal_p2p_invitation_result(struct wpa_supplicant *wpa_s,
 					    int status, const u8 *bssid);
-void wpas_dbus_register_p2p_groupmember(struct wpa_supplicant *wpa_s,
-					const u8 *p2p_if_addr);
-void wpas_dbus_unregister_p2p_groupmember(struct wpa_supplicant *wpa_s,
-					  const u8 *p2p_if_addr);
 void wpas_dbus_signal_p2p_peer_disconnected(struct wpa_supplicant *wpa_s,
 					    const u8 *member);
 void wpas_dbus_signal_p2p_sd_request(struct wpa_supplicant *wpa_s,
@@ -357,6 +352,12 @@ static inline int wpas_dbus_unregister_peer(struct wpa_supplicant *wpa_s,
 					    const u8 *dev_addr)
 {
 	return 0;
+}
+
+static inline void
+wpas_dbus_signal_peer_groups_changed(struct wpa_supplicant *wpa_s,
+				     const u8 *dev_addr)
+{
 }
 
 static inline void

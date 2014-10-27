@@ -1515,6 +1515,9 @@ OBJS += ../src/common/common_module_tests.o
 ifdef CONFIG_WPS
 OBJS += ../src/wps/wps_module_tests.o
 endif
+ifndef CONFIG_P2P
+OBJS += ../src/utils/bitfield.o
+endif
 endif
 
 OBJS += ../src/drivers/driver_common.o

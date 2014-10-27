@@ -73,10 +73,8 @@ static void wpas_wps_assoc_with_cred_cancel(struct wpa_supplicant *wpa_s)
 
 int wpas_wps_eapol_cb(struct wpa_supplicant *wpa_s)
 {
-#ifdef CONFIG_P2P
 	if (wpas_p2p_wps_eapol_cb(wpa_s) > 0)
 		return 1;
-#endif /* CONFIG_P2P */
 
 	if (!wpa_s->wps_success &&
 	    wpa_s->current_ssid &&
@@ -288,10 +286,53 @@ static void wpas_wps_remove_dup_network(struct wpa_supplicant *wpa_s,
 		/* compare security parameters */
 		if (ssid->auth_alg != new_ssid->auth_alg ||
 		    ssid->key_mgmt != new_ssid->key_mgmt ||
-		    ssid->proto != new_ssid->proto ||
-		    ssid->pairwise_cipher != new_ssid->pairwise_cipher ||
 		    ssid->group_cipher != new_ssid->group_cipher)
 			continue;
+
+		/*
+		 * Some existing WPS APs will send two creds in case they are
+		 * configured for mixed mode operation (WPA+WPA2 and TKIP+CCMP).
+		 * Try to merge these two creds if they are received in the same
+		 * M8 message.
+		 */
+		if (ssid->wps_run && ssid->wps_run == new_ssid->wps_run &&
+		    wpa_key_mgmt_wpa_psk(ssid->key_mgmt)) {
+			if (new_ssid->passphrase && ssid->passphrase &&
+			    os_strcmp(new_ssid->passphrase, ssid->passphrase) !=
+			    0) {
+				wpa_printf(MSG_DEBUG,
+					   "WPS: M8 Creds with different passphrase - do not merge");
+				continue;
+			}
+
+			if (new_ssid->psk_set &&
+			    (!ssid->psk_set ||
+			     os_memcmp(new_ssid->psk, ssid->psk, 32) != 0)) {
+				wpa_printf(MSG_DEBUG,
+					   "WPS: M8 Creds with different PSK - do not merge");
+				continue;
+			}
+
+			if ((new_ssid->passphrase && !ssid->passphrase) ||
+			    (!new_ssid->passphrase && ssid->passphrase)) {
+				wpa_printf(MSG_DEBUG,
+					   "WPS: M8 Creds with different passphrase/PSK type - do not merge");
+				continue;
+			}
+
+			wpa_printf(MSG_DEBUG,
+				   "WPS: Workaround - merge likely WPA/WPA2-mixed mode creds in same M8 message");
+			new_ssid->proto |= ssid->proto;
+			new_ssid->pairwise_cipher |= ssid->pairwise_cipher;
+		} else {
+			/*
+			 * proto and pairwise_cipher difference matter for
+			 * non-mixed-mode creds.
+			 */
+			if (ssid->proto != new_ssid->proto ||
+			    ssid->pairwise_cipher != new_ssid->pairwise_cipher)
+				continue;
+		}
 
 		/* Remove the duplicated older network entry. */
 		wpa_printf(MSG_DEBUG, "Remove duplicate network %d", ssid->id);
@@ -413,6 +454,7 @@ static int wpa_supplicant_wps_cred(void *ctx,
 	}
 
 	wpa_config_set_network_defaults(ssid);
+	ssid->wps_run = wpa_s->wps_run;
 
 	os_free(ssid->ssid);
 	ssid->ssid = os_malloc(cred->ssid_len);
@@ -576,9 +618,7 @@ static void wpa_supplicant_wps_event_fail(struct wpa_supplicant *wpa_s,
 	eloop_register_timeout(0, 100000, wpas_wps_clear_timeout, wpa_s, NULL);
 
 	wpas_notify_wps_event_fail(wpa_s, fail);
-#ifdef CONFIG_P2P
 	wpas_p2p_wps_failed(wpa_s, fail);
-#endif /* CONFIG_P2P */
 }
 
 
@@ -637,9 +677,7 @@ static void wpa_supplicant_wps_event_success(struct wpa_supplicant *wpa_s)
 	eloop_register_timeout(10, 0, wpas_wps_reenable_networks_cb, wpa_s,
 			       NULL);
 
-#ifdef CONFIG_P2P
 	wpas_p2p_wps_success(wpa_s, wpa_s->bssid, 0);
-#endif /* CONFIG_P2P */
 }
 
 
@@ -1010,6 +1048,9 @@ static void wpas_wps_reassoc(struct wpa_supplicant *wpa_s,
 {
 	struct wpa_bss *bss;
 
+	wpa_s->wps_run++;
+	if (wpa_s->wps_run == 0)
+		wpa_s->wps_run++;
 	wpa_s->after_wps = 0;
 	wpa_s->known_wps_freq = 0;
 	if (freq) {

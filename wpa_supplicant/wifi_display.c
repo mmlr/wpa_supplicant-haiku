@@ -36,6 +36,34 @@ void wifi_display_deinit(struct wpa_global *global)
 }
 
 
+struct wpabuf * wifi_display_get_wfd_ie(struct wpa_global *global)
+{
+	struct wpabuf *ie;
+	size_t len;
+	int i;
+
+	if (global->p2p == NULL)
+		return NULL;
+
+	len = 0;
+	for (i = 0; i < MAX_WFD_SUBELEMS; i++) {
+		if (global->wfd_subelem[i])
+			len += wpabuf_len(global->wfd_subelem[i]);
+	}
+
+	ie = wpabuf_alloc(len);
+	if (ie == NULL)
+		return NULL;
+
+	for (i = 0; i < MAX_WFD_SUBELEMS; i++) {
+		if (global->wfd_subelem[i])
+			wpabuf_put_buf(ie, global->wfd_subelem[i]);
+	}
+
+	return ie;
+}
+
+
 static int wifi_display_update_wfd_ie(struct wpa_global *global)
 {
 	struct wpabuf *ie, *buf;
@@ -238,6 +266,60 @@ int wifi_display_subelem_set(struct wpa_global *global, char *cmd)
 }
 
 
+int wifi_display_subelem_set_from_ies(struct wpa_global *global,
+				      struct wpabuf *ie)
+{
+	int subelements[MAX_WFD_SUBELEMS] = {};
+	const u8 *pos, *end;
+	int len, subelem;
+	struct wpabuf *e;
+
+	wpa_printf(MSG_DEBUG, "WFD IEs set: %p - %lu",
+		   ie, ie ? (unsigned long) wpabuf_len(ie) : 0);
+
+	if (ie == NULL || wpabuf_len(ie) < 6)
+		return -1;
+
+	pos = wpabuf_head(ie);
+	end = pos + wpabuf_len(ie);
+
+	while (end > pos) {
+		if (pos + 3 > end)
+			break;
+
+		len = WPA_GET_BE16(pos + 1) + 3;
+
+		wpa_printf(MSG_DEBUG, "WFD Sub-Element ID %d - len %d",
+			   *pos, len - 3);
+
+		if (pos + len > end)
+			break;
+
+		subelem = *pos;
+		if (subelem < MAX_WFD_SUBELEMS && subelements[subelem] == 0) {
+			e = wpabuf_alloc_copy(pos, len);
+			if (e == NULL)
+				return -1;
+
+			wpabuf_free(global->wfd_subelem[subelem]);
+			global->wfd_subelem[subelem] = e;
+			subelements[subelem] = 1;
+		}
+
+		pos += len;
+	}
+
+	for (subelem = 0; subelem < MAX_WFD_SUBELEMS; subelem++) {
+		if (subelements[subelem] == 0) {
+			wpabuf_free(global->wfd_subelem[subelem]);
+			global->wfd_subelem[subelem] = NULL;
+		}
+	}
+
+	return wifi_display_update_wfd_ie(global);
+}
+
+
 int wifi_display_subelem_get(struct wpa_global *global, char *cmd,
 			     char *buf, size_t buflen)
 {
@@ -276,8 +358,20 @@ char * wifi_display_subelem_hex(const struct wpabuf *wfd_subelems, u8 id)
 
 	while (i + WIFI_DISPLAY_SUBELEM_HEADER_LEN < buflen) {
 		elen = WPA_GET_BE16(buf + i + 1);
+		if (i + WIFI_DISPLAY_SUBELEM_HEADER_LEN + elen > buflen)
+			break; /* truncated subelement */
 
 		if (buf[i] == id) {
+			/*
+			 * Limit explicitly to an arbitrary length to avoid
+			 * unnecessarily large allocations. In practice, this
+			 * is limited to maximum frame length anyway, so the
+			 * maximum memory allocation here is not really that
+			 * large. Anyway, the Wi-Fi Display subelements that
+			 * are fetched with this function are even shorter.
+			 */
+			if (elen > 1000)
+				break;
 			subelem = os_zalloc(2 * elen + 1);
 			if (!subelem)
 				return NULL;

@@ -158,6 +158,13 @@ static void wpas_trigger_scan_cb(struct wpa_radio_work *work, int deinit)
 		return;
 	}
 
+	if (wpas_update_random_addr_disassoc(wpa_s) < 0) {
+		wpa_msg(wpa_s, MSG_INFO,
+			"Failed to assign random MAC address for a scan");
+		radio_work_done(work);
+		return;
+	}
+
 	wpa_supplicant_notify_scanning(wpa_s, 1);
 
 	if (wpa_s->clear_driver_scan_cache)
@@ -548,6 +555,47 @@ static void wpa_setband_scan_freqs(struct wpa_supplicant *wpa_s,
 }
 
 
+static void wpa_set_scan_ssids(struct wpa_supplicant *wpa_s,
+			       struct wpa_driver_scan_params *params,
+			       size_t max_ssids)
+{
+	unsigned int i;
+	struct wpa_ssid *ssid;
+
+	for (i = 0; i < wpa_s->scan_id_count; i++) {
+		unsigned int j;
+
+		ssid = wpa_config_get_network(wpa_s->conf, wpa_s->scan_id[i]);
+		if (!ssid || !ssid->scan_ssid)
+			continue;
+
+		for (j = 0; j < params->num_ssids; j++) {
+			if (params->ssids[j].ssid_len == ssid->ssid_len &&
+			    params->ssids[j].ssid &&
+			    os_memcmp(params->ssids[j].ssid, ssid->ssid,
+				      ssid->ssid_len) == 0)
+				break;
+		}
+		if (j < params->num_ssids)
+			continue; /* already in the list */
+
+		if (params->num_ssids + 1 > max_ssids) {
+			wpa_printf(MSG_DEBUG,
+				   "Over max scan SSIDs for manual request");
+			break;
+		}
+
+		wpa_printf(MSG_DEBUG, "Scan SSID (manual request): %s",
+			   wpa_ssid_txt(ssid->ssid, ssid->ssid_len));
+		params->ssids[params->num_ssids].ssid = ssid->ssid;
+		params->ssids[params->num_ssids].ssid_len = ssid->ssid_len;
+		params->num_ssids++;
+	}
+
+	wpa_s->scan_id_count = 0;
+}
+
+
 static void wpa_supplicant_scan(void *eloop_ctx, void *timeout_ctx)
 {
 	struct wpa_supplicant *wpa_s = eloop_ctx;
@@ -605,13 +653,11 @@ static void wpa_supplicant_scan(void *eloop_ctx, void *timeout_ctx)
 		return;
 	}
 
-#ifdef CONFIG_P2P
 	if (wpas_p2p_in_progress(wpa_s)) {
 		wpa_dbg(wpa_s, MSG_DEBUG, "Delay station mode scan while P2P operation is in progress");
 		wpa_supplicant_req_scan(wpa_s, 5, 0);
 		return;
 	}
-#endif /* CONFIG_P2P */
 
 	if (wpa_s->conf->ap_scan == 2)
 		max_ssids = 1;
@@ -759,6 +805,10 @@ static void wpa_supplicant_scan(void *eloop_ctx, void *timeout_ctx)
 			    start != wpa_s->conf->ssid)
 				ssid = wpa_s->conf->ssid;
 		}
+
+		if (wpa_s->scan_id_count &&
+		    wpa_s->last_scan_req == MANUAL_SCAN_REQ)
+			wpa_set_scan_ssids(wpa_s, &params, max_ssids);
 
 		for (tssid = wpa_s->conf->ssid; tssid; tssid = tssid->next) {
 			if (wpas_network_disabled(wpa_s, tssid))
@@ -1200,6 +1250,13 @@ int wpa_supplicant_req_sched_scan(struct wpa_supplicant *wpa_s)
 
 	if (wpa_s->conf->filter_rssi)
 		params.filter_rssi = wpa_s->conf->filter_rssi;
+
+	/* See if user specified frequencies. If so, scan only those. */
+	if (wpa_s->conf->freq_list && !params.freqs) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"Optimize scan based on conf->freq_list");
+		int_array_concat(&params.freqs, wpa_s->conf->freq_list);
+	}
 
 	scan_params = &params;
 
@@ -1859,6 +1916,7 @@ wpa_scan_clone_params(const struct wpa_driver_scan_params *src)
 	params->filter_rssi = src->filter_rssi;
 	params->p2p_probe = src->p2p_probe;
 	params->only_new_results = src->only_new_results;
+	params->low_priority = src->low_priority;
 
 	return params;
 
@@ -1887,7 +1945,7 @@ void wpa_scan_free_params(struct wpa_driver_scan_params *params)
 int wpas_start_pno(struct wpa_supplicant *wpa_s)
 {
 	int ret, interval;
-	size_t i, num_ssid;
+	size_t i, num_ssid, num_match_ssid;
 	struct wpa_ssid *ssid;
 	struct wpa_driver_scan_params params;
 
@@ -1916,41 +1974,58 @@ int wpas_start_pno(struct wpa_supplicant *wpa_s)
 
 	os_memset(&params, 0, sizeof(params));
 
-	num_ssid = 0;
+	num_ssid = num_match_ssid = 0;
 	ssid = wpa_s->conf->ssid;
 	while (ssid) {
-		if (!wpas_network_disabled(wpa_s, ssid))
-			num_ssid++;
+		if (!wpas_network_disabled(wpa_s, ssid)) {
+			num_match_ssid++;
+			if (ssid->scan_ssid)
+				num_ssid++;
+		}
 		ssid = ssid->next;
 	}
+
+	if (num_match_ssid == 0) {
+		wpa_printf(MSG_DEBUG, "PNO: No configured SSIDs");
+		return -1;
+	}
+
+	if (num_match_ssid > num_ssid) {
+		params.num_ssids++; /* wildcard */
+		num_ssid++;
+	}
+
 	if (num_ssid > WPAS_MAX_SCAN_SSIDS) {
 		wpa_printf(MSG_DEBUG, "PNO: Use only the first %u SSIDs from "
 			   "%u", WPAS_MAX_SCAN_SSIDS, (unsigned int) num_ssid);
 		num_ssid = WPAS_MAX_SCAN_SSIDS;
 	}
 
-	if (num_ssid == 0) {
-		wpa_printf(MSG_DEBUG, "PNO: No configured SSIDs");
-		return -1;
+	if (num_match_ssid > wpa_s->max_match_sets) {
+		num_match_ssid = wpa_s->max_match_sets;
+		wpa_dbg(wpa_s, MSG_DEBUG, "PNO: Too many SSIDs to match");
 	}
-
-	params.filter_ssids = os_malloc(sizeof(struct wpa_driver_scan_filter) *
-					num_ssid);
+	params.filter_ssids = os_calloc(num_match_ssid,
+					sizeof(struct wpa_driver_scan_filter));
 	if (params.filter_ssids == NULL)
 		return -1;
 	i = 0;
 	ssid = wpa_s->conf->ssid;
 	while (ssid) {
 		if (!wpas_network_disabled(wpa_s, ssid)) {
-			params.ssids[i].ssid = ssid->ssid;
-			params.ssids[i].ssid_len = ssid->ssid_len;
-			params.num_ssids++;
+			if (ssid->scan_ssid && params.num_ssids < num_ssid) {
+				params.ssids[params.num_ssids].ssid =
+					ssid->ssid;
+				params.ssids[params.num_ssids].ssid_len =
+					 ssid->ssid_len;
+				params.num_ssids++;
+			}
 			os_memcpy(params.filter_ssids[i].ssid, ssid->ssid,
 				  ssid->ssid_len);
 			params.filter_ssids[i].ssid_len = ssid->ssid_len;
 			params.num_filter_ssids++;
 			i++;
-			if (i == num_ssid)
+			if (i == num_match_ssid)
 				break;
 		}
 		ssid = ssid->next;

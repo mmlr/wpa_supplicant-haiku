@@ -12,6 +12,7 @@
 #include "utils/list.h"
 #include "common/defs.h"
 #include "common/sae.h"
+#include "common/wpa_ctrl.h"
 #include "wps/wps_defs.h"
 #include "config_ssid.h"
 
@@ -66,7 +67,7 @@ struct wpa_interface {
 
 #ifdef CONFIG_P2P
 	/**
-	 * conf_p2p_dev - Additional configuration file used to hold the
+	 * conf_p2p_dev - Configuration file used to hold the
 	 * P2P Device configuration parameters.
 	 *
 	 * This can also be %NULL. In such a case, if a P2P Device dedicated
@@ -365,6 +366,14 @@ struct wpa_ssid_value {
 	size_t ssid_len;
 };
 
+#define WPA_FREQ_USED_BY_INFRA_STATION BIT(0)
+#define WPA_FREQ_USED_BY_P2P_CLIENT BIT(1)
+
+struct wpa_used_freq_data {
+	int freq;
+	unsigned int flags;
+};
+
 /**
  * struct wpa_supplicant - Internal data for wpa_supplicant interface
  *
@@ -382,6 +391,7 @@ struct wpa_supplicant {
 	struct l2_packet_data *l2;
 	struct l2_packet_data *l2_br;
 	unsigned char own_addr[ETH_ALEN];
+	unsigned char perm_addr[ETH_ALEN];
 	char ifname[100];
 #ifdef CONFIG_CTRL_IFACE_DBUS
 	char *dbus_path;
@@ -398,10 +408,6 @@ struct wpa_supplicant {
 	char *confname;
 	char *confanother;
 
-#ifdef CONFIG_P2P
-	char *conf_p2p_dev;
-#endif /* CONFIG_P2P */
-
 	struct wpa_config *conf;
 	int countermeasures;
 	struct os_reltime last_michael_mic_error;
@@ -412,6 +418,7 @@ struct wpa_supplicant {
 	int disconnected; /* all connections disabled; i.e., do no reassociate
 			   * before this has been cleared */
 	struct wpa_ssid *current_ssid;
+	struct wpa_ssid *last_ssid;
 	struct wpa_bss *current_bss;
 	int ap_ies_from_associnfo;
 	unsigned int assoc_freq;
@@ -560,6 +567,9 @@ struct wpa_supplicant {
 	int normal_scans; /* normal scans run before sched_scan */
 	int scan_for_connection; /* whether the scan request was triggered for
 				  * finding a connection */
+#define MAX_SCAN_ID 16
+	int scan_id[MAX_SCAN_ID];
+	unsigned int scan_id_count;
 
 	unsigned int drv_flags;
 	unsigned int drv_enc;
@@ -588,6 +598,7 @@ struct wpa_supplicant {
 	struct wps_context *wps;
 	int wps_success; /* WPS success event received */
 	struct wps_er *wps_er;
+	unsigned int wps_run;
 	int blacklist_cleared;
 
 	struct wpabuf *pending_eapol_rx;
@@ -596,6 +607,10 @@ struct wpa_supplicant {
 	unsigned int last_eapol_matches_bssid:1;
 	unsigned int eap_expected_failure:1;
 	unsigned int reattach:1; /* reassociation to the same BSS requested */
+	unsigned int mac_addr_changed:1;
+
+	struct os_reltime last_mac_addr_change;
+	int last_mac_addr_style;
 
 	struct ibss_rsn *ibss_rsn;
 
@@ -628,6 +643,7 @@ struct wpa_supplicant {
 					* sa_query_count octets of pending
 					* SA Query transaction identifiers */
 		struct os_reltime sa_query_start;
+		struct os_reltime last_unprot_disconnect;
 		u8 sched_obss_scan;
 		u16 obss_scan_int;
 		u16 bss_max_idle_period;
@@ -848,6 +864,8 @@ struct wpa_supplicant {
 	struct wpa_radio_work *connect_work;
 
 	unsigned int ext_work_id;
+
+	struct wpabuf *vendor_elem[NUM_VENDOR_ELEM_FRAMES];
 };
 
 
@@ -941,7 +959,9 @@ int disallowed_bssid(struct wpa_supplicant *wpa_s, const u8 *bssid);
 int disallowed_ssid(struct wpa_supplicant *wpa_s, const u8 *ssid,
 		    size_t ssid_len);
 void wpas_request_connection(struct wpa_supplicant *wpa_s);
-int wpas_build_ext_capab(struct wpa_supplicant *wpa_s, u8 *buf);
+int wpas_build_ext_capab(struct wpa_supplicant *wpa_s, u8 *buf, size_t buflen);
+int wpas_update_random_addr(struct wpa_supplicant *wpa_s, int style);
+int wpas_update_random_addr_disassoc(struct wpa_supplicant *wpa_s);
 
 /**
  * wpa_supplicant_ctrl_iface_ctrl_rsp_handle - Handle a control response
@@ -969,6 +989,8 @@ void wnm_bss_keep_alive_deinit(struct wpa_supplicant *wpa_s);
 int wpa_supplicant_fast_associate(struct wpa_supplicant *wpa_s);
 struct wpa_bss * wpa_supplicant_pick_network(struct wpa_supplicant *wpa_s,
 					     struct wpa_ssid **selected_ssid);
+int ht_supported(const struct hostapd_hw_modes *mode);
+int vht_supported(const struct hostapd_hw_modes *mode);
 
 /* eap_register.c */
 int eap_register_methods(void);
@@ -987,8 +1009,13 @@ int wpas_network_disabled(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid);
 
 int wpas_init_ext_pw(struct wpa_supplicant *wpa_s);
 
-void dump_freq_array(struct wpa_supplicant *wpa_s, const char *title,
-		     int *freq_array, unsigned int len);
+void dump_freq_data(struct wpa_supplicant *wpa_s, const char *title,
+		    struct wpa_used_freq_data *freqs_data,
+		    unsigned int len);
+
+int get_shared_radio_freqs_data(struct wpa_supplicant *wpa_s,
+				struct wpa_used_freq_data *freqs_data,
+				unsigned int len);
 int get_shared_radio_freqs(struct wpa_supplicant *wpa_s,
 			   int *freq_array, unsigned int len);
 

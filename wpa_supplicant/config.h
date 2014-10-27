@@ -19,12 +19,15 @@
 #define DEFAULT_P2P_GO_INTENT 7
 #define DEFAULT_P2P_INTRA_BSS 1
 #define DEFAULT_P2P_GO_MAX_INACTIVITY (5 * 60)
+#define DEFAULT_P2P_OPTIMIZE_LISTEN_CHAN 0
 #define DEFAULT_BSS_MAX_COUNT 200
 #define DEFAULT_BSS_EXPIRATION_AGE 180
 #define DEFAULT_BSS_EXPIRATION_SCAN_COUNT 2
 #define DEFAULT_MAX_NUM_STA 128
 #define DEFAULT_ACCESS_NETWORK_TYPE 15
 #define DEFAULT_SCAN_CUR_FREQ 0
+#define DEFAULT_P2P_SEARCH_DELAY 500
+#define DEFAULT_RAND_ADDR_LIFETIME 60
 
 #include "config_ssid.h"
 #include "wps/wps.h"
@@ -315,6 +318,7 @@ struct wpa_cred {
 #define CFG_CHANGED_P2P_PREF_CHAN BIT(13)
 #define CFG_CHANGED_EXT_PW_BACKEND BIT(14)
 #define CFG_CHANGED_NFC_PASSWORD_TOKEN BIT(15)
+#define CFG_CHANGED_P2P_PASSPHRASE_LEN BIT(16)
 
 /**
  * struct wpa_config - wpa_supplicant configuration data
@@ -685,6 +689,7 @@ struct wpa_config {
 	struct wpa_freq_range_list p2p_no_go_freq;
 	int p2p_add_cli_chan;
 	int p2p_ignore_shared_freq;
+	int p2p_optimize_listen_chan;
 
 	struct wpabuf *wps_vendor_ext_m1;
 
@@ -711,6 +716,14 @@ struct wpa_config {
 	 * connection has been established.
 	 */
 	int p2p_group_idle;
+
+	/**
+	 * p2p_passphrase_len - Passphrase length (8..63) for P2P GO
+	 *
+	 * This parameter controls the length of the random passphrase that is
+	 * generated at the GO.
+	 */
+	unsigned int p2p_passphrase_len;
 
 	/**
 	 * bss_max_count - Maximum number of BSS entries to keep in memory
@@ -1029,6 +1042,43 @@ struct wpa_config {
 	 * If set, these wowlan triggers will be configured.
 	 */
 	char *wowlan_triggers;
+
+	/**
+	 * p2p_search_delay - Extra delay between concurrent search iterations
+	 *
+	 * Add extra delay (in milliseconds) between search iterations when
+	 * there is a concurrent operation to make p2p_find friendlier to
+	 * concurrent operations by avoiding it from taking 100% of radio
+	 * resources.
+	 */
+	unsigned int p2p_search_delay;
+
+	/**
+	 * mac_addr - MAC address policy default
+	 *
+	 * 0 = use permanent MAC address
+	 * 1 = use random MAC address for each ESS connection
+	 * 2 = like 1, but maintain OUI (with local admin bit set)
+	 *
+	 * By default, permanent MAC address is used unless policy is changed by
+	 * the per-network mac_addr parameter. Global mac_addr=1 can be used to
+	 * change this default behavior.
+	 */
+	int mac_addr;
+
+	/**
+	 * rand_addr_lifetime - Lifetime of random MAC address in seconds
+	 */
+	unsigned int rand_addr_lifetime;
+
+	/**
+	 * preassoc_mac_addr - Pre-association MAC address policy
+	 *
+	 * 0 = use permanent MAC address
+	 * 1 = use random MAC address
+	 * 2 = like 1, but maintain OUI (with local admin bit set)
+	 */
+	int preassoc_mac_addr;
 };
 
 
