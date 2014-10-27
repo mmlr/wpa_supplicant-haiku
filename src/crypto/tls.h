@@ -1,6 +1,6 @@
 /*
  * SSL/TLS interface definition
- * Copyright (c) 2004-2010, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2013, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -40,7 +40,9 @@ enum tls_fail_reason {
 	TLS_FAIL_SUBJECT_MISMATCH = 5,
 	TLS_FAIL_ALTSUBJECT_MISMATCH = 6,
 	TLS_FAIL_BAD_CERTIFICATE = 7,
-	TLS_FAIL_SERVER_CHAIN_PROBE = 8
+	TLS_FAIL_SERVER_CHAIN_PROBE = 8,
+	TLS_FAIL_DOMAIN_SUFFIX_MISMATCH = 9,
+	TLS_FAIL_SERVER_USED_CLIENT_CERT = 10
 };
 
 union tls_event_data {
@@ -82,6 +84,8 @@ struct tls_config {
 #define TLS_CONN_ALLOW_SIGN_RSA_MD5 BIT(0)
 #define TLS_CONN_DISABLE_TIME_CHECKS BIT(1)
 #define TLS_CONN_DISABLE_SESSION_TICKET BIT(2)
+#define TLS_CONN_REQUEST_OCSP BIT(3)
+#define TLS_CONN_REQUIRE_OCSP BIT(4)
 
 /**
  * struct tls_connection_params - Parameters for TLS connection
@@ -94,6 +98,8 @@ struct tls_config {
  * %NULL to allow all subjects
  * @altsubject_match: String to match in the alternative subject of the peer
  * certificate or %NULL to allow all alternative subjects
+ * @suffix_match: String to suffix match in the dNSName or CN of the peer
+ * certificate or %NULL to allow all domain names
  * @client_cert: File or reference name for client X.509 certificate in PEM or
  * DER format
  * @client_cert_blob: client_cert as inlined data or %NULL if not used
@@ -117,6 +123,8 @@ struct tls_config {
  * @cert_id: the certificate's id when using engine
  * @ca_cert_id: the CA certificate's id when using engine
  * @flags: Parameter options (TLS_CONN_*)
+ * @ocsp_stapling_response: DER encoded file with cached OCSP stapling response
+ *	or %NULL if OCSP is not enabled
  *
  * TLS connection parameters to be configured with tls_connection_set_params()
  * and tls_global_set_params().
@@ -133,6 +141,7 @@ struct tls_connection_params {
 	const char *ca_path;
 	const char *subject_match;
 	const char *altsubject_match;
+	const char *suffix_match;
 	const char *client_cert;
 	const u8 *client_cert_blob;
 	size_t client_cert_blob_len;
@@ -153,6 +162,7 @@ struct tls_connection_params {
 	const char *ca_cert_id;
 
 	unsigned int flags;
+	const char *ocsp_stapling_response;
 };
 
 

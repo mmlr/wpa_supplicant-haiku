@@ -15,8 +15,8 @@ struct sta_info;
 struct hostapd_frame_info;
 struct ieee80211_ht_capabilities;
 
-void ieee802_11_mgmt(struct hostapd_data *hapd, const u8 *buf, size_t len,
-		     struct hostapd_frame_info *fi);
+int ieee802_11_mgmt(struct hostapd_data *hapd, const u8 *buf, size_t len,
+		    struct hostapd_frame_info *fi);
 void ieee802_11_mgmt_cb(struct hostapd_data *hapd, const u8 *buf, size_t len,
 			u16 stype, int ok);
 void ieee802_11_print_ssid(char *buf, const u8 *ssid, u8 len);
@@ -41,6 +41,7 @@ static inline int ieee802_11_get_mib_sta(struct hostapd_data *hapd,
 u16 hostapd_own_capab_info(struct hostapd_data *hapd, struct sta_info *sta,
 			   int probe);
 u8 * hostapd_eid_ext_capab(struct hostapd_data *hapd, u8 *eid);
+u8 * hostapd_eid_qos_map_set(struct hostapd_data *hapd, u8 *eid);
 u8 * hostapd_eid_supp_rates(struct hostapd_data *hapd, u8 *eid);
 u8 * hostapd_eid_ext_supp_rates(struct hostapd_data *hapd, u8 *eid);
 u8 * hostapd_eid_ht_capabilities(struct hostapd_data *hapd, u8 *eid);
@@ -53,6 +54,9 @@ void ieee802_11_send_sa_query_req(struct hostapd_data *hapd,
 void hostapd_get_ht_capab(struct hostapd_data *hapd,
 			  struct ieee80211_ht_capabilities *ht_cap,
 			  struct ieee80211_ht_capabilities *neg_ht_cap);
+void hostapd_get_vht_capab(struct hostapd_data *hapd,
+			   struct ieee80211_vht_capabilities *vht_cap,
+			   struct ieee80211_vht_capabilities *neg_vht_cap);
 u16 copy_sta_ht_capab(struct hostapd_data *hapd, struct sta_info *sta,
 		      const u8 *ht_capab, size_t ht_capab_len);
 void update_ht_state(struct hostapd_data *hapd, struct sta_info *sta);

@@ -82,7 +82,11 @@ struct bsd_driver_data {
 	int	prev_roaming;	/* roaming state to restore on deinit */
 	int	prev_privacy;	/* privacy state to restore on deinit */
 	int	prev_wpa;	/* wpa state to restore on deinit */
-#ifdef __HAIKU__
+	enum ieee80211_opmode opmode;	/* operation mode */
+#ifndef __HAIKU__
+	char	*event_buf;
+	size_t	event_buf_len;
+#else
 	void	*events;
 #endif
 };
@@ -290,10 +294,15 @@ bsd_ctrl_iface(void *priv, int enable)
 		return -1;
 	}
 
-	if (enable)
+	if (enable) {
+		if (ifr.ifr_flags & IFF_UP)
+			return 0;
 		ifr.ifr_flags |= IFF_UP;
-	else
+	} else {
+		if (!(ifr.ifr_flags & IFF_UP))
+			return 0;
 		ifr.ifr_flags &= ~IFF_UP;
+	}
 
 	if (ioctl(drv->sock, SIOCSIFFLAGS, &ifr, sizeof(ifr)) < 0) {
 		perror("ioctl[SIOCSIFFLAGS]");
@@ -313,6 +322,9 @@ bsd_set_key(const char *ifname, void *priv, enum wpa_alg alg,
 	    size_t seq_len, const u8 *key, size_t key_len)
 {
 	struct ieee80211req_key wk;
+#ifdef IEEE80211_KEY_NOREPLAY
+	struct bsd_driver_data *drv = priv;
+#endif /* IEEE80211_KEY_NOREPLAY */
 
 	wpa_printf(MSG_DEBUG, "%s: alg=%d addr=%p key_idx=%d set_tx=%d "
 		   "seq_len=%zu key_len=%zu", __func__, alg, addr, key_idx,
@@ -367,6 +379,16 @@ bsd_set_key(const char *ifname, void *priv, enum wpa_alg alg,
 	}
 	if (wk.ik_keyix != IEEE80211_KEYIX_NONE && set_tx)
 		wk.ik_flags |= IEEE80211_KEY_DEFAULT;
+#ifndef HOSTAPD
+#ifdef IEEE80211_KEY_NOREPLAY
+	/*
+	 * Ignore replay failures in IBSS and AHDEMO mode.
+	 */
+	if (drv->opmode == IEEE80211_M_IBSS ||
+	    drv->opmode == IEEE80211_M_AHDEMO)
+		wk.ik_flags |= IEEE80211_KEY_NOREPLAY;
+#endif /* IEEE80211_KEY_NOREPLAY */
+#endif /* HOSTAPD */
 	wk.ik_keylen = key_len;
 	if (seq) {
 #ifdef WORDS_BIGENDIAN
@@ -502,26 +524,6 @@ bsd_set_ieee8021x(void *priv, struct wpa_bss_params *params)
 	return bsd_ctrl_iface(priv, 1);
 }
 
-static int
-bsd_set_sta_authorized(void *priv, const u8 *addr,
-		       int total_flags, int flags_or, int flags_and)
-{
-	int authorized = -1;
-
-	/* For now, only support setting Authorized flag */
-	if (flags_or & WPA_STA_AUTHORIZED)
-		authorized = 1;
-	if (!(flags_and & WPA_STA_AUTHORIZED))
-		authorized = 0;
-
-	if (authorized < 0)
-		return 0;
-
-	return bsd_send_mlme_param(priv, authorized ?
-				   IEEE80211_MLME_AUTHORIZE :
-				   IEEE80211_MLME_UNAUTHORIZE, 0, addr);
-}
-
 #ifndef __HAIKU__
 static void
 bsd_new_sta(void *priv, void *ctx, u8 addr[IEEE80211_ADDR_LEN])
@@ -617,7 +619,7 @@ bsd_set_opt_ie(void *priv, const u8 *ie, size_t ie_len)
 }
 
 #ifndef __HAIKU__
-static int
+static size_t
 rtbuf_len(void)
 {
 	size_t len;
@@ -755,37 +757,26 @@ static void
 bsd_wireless_event_receive(int sock, void *ctx, void *sock_ctx)
 {
 	struct bsd_driver_data *drv = ctx;
-	char *buf;
 	struct if_announcemsghdr *ifan;
 	struct rt_msghdr *rtm;
 	struct ieee80211_michael_event *mic;
 	struct ieee80211_join_event *join;
 	struct ieee80211_leave_event *leave;
-	int n, len;
+	int n;
 	union wpa_event_data data;
 
-	len = rtbuf_len();
-
-	buf = os_malloc(len);
-	if (buf == NULL) {
-		wpa_printf(MSG_ERROR, "%s os_malloc() failed\n", __func__);
-		return;
-	}
-
-	n = read(sock, buf, len);
+	n = read(sock, drv->event_buf, drv->event_buf_len);
 	if (n < 0) {
 		if (errno != EINTR && errno != EAGAIN)
 			wpa_printf(MSG_ERROR, "%s read() failed: %s\n",
 				   __func__, strerror(errno));
-		os_free(buf);
 		return;
 	}
 
-	rtm = (struct rt_msghdr *) buf;
+	rtm = (struct rt_msghdr *) drv->event_buf;
 	if (rtm->rtm_version != RTM_VERSION) {
 		wpa_printf(MSG_DEBUG, "Invalid routing message version=%d",
 			   rtm->rtm_version);
-		os_free(buf);
 		return;
 	}
 	ifan = (struct if_announcemsghdr *) rtm;
@@ -826,7 +817,6 @@ bsd_wireless_event_receive(int sock, void *ctx, void *sock_ctx)
 		}
 		break;
 	}
-	os_free(buf);
 }
 
 static void
@@ -843,7 +833,15 @@ bsd_init(struct hostapd_data *hapd, struct wpa_init_params *params)
 
 	drv = os_zalloc(sizeof(struct bsd_driver_data));
 	if (drv == NULL) {
-		printf("Could not allocate memory for bsd driver data\n");
+		wpa_printf(MSG_ERROR, "Could not allocate memory for bsd driver data");
+		return NULL;
+	}
+
+	drv->event_buf_len = rtbuf_len();
+
+	drv->event_buf = os_malloc(drv->event_buf_len);
+	if (drv->event_buf == NULL) {
+		wpa_printf(MSG_ERROR, "%s: os_malloc() failed", __func__);
 		goto bad;
 	}
 
@@ -886,6 +884,7 @@ bad:
 		l2_packet_deinit(drv->sock_xmit);
 	if (drv->sock >= 0)
 		close(drv->sock);
+	os_free(drv->event_buf);
 	if (drv != NULL)
 		os_free(drv);
 	return NULL;
@@ -906,9 +905,37 @@ bsd_deinit(void *priv)
 		close(drv->sock);
 	if (drv->sock_xmit != NULL)
 		l2_packet_deinit(drv->sock_xmit);
+	os_free(drv->event_buf);
 	os_free(drv);
 }
 
+
+static int
+bsd_commit(void *priv)
+{
+	return bsd_ctrl_iface(priv, 1);
+}
+
+
+static int
+bsd_set_sta_authorized(void *priv, const u8 *addr,
+		       int total_flags, int flags_or, int flags_and)
+{
+	int authorized = -1;
+
+	/* For now, only support setting Authorized flag */
+	if (flags_or & WPA_STA_AUTHORIZED)
+		authorized = 1;
+	if (!(flags_and & WPA_STA_AUTHORIZED))
+		authorized = 0;
+
+	if (authorized < 0)
+		return 0;
+
+	return bsd_send_mlme_param(priv, authorized ?
+				   IEEE80211_MLME_AUTHORIZE :
+				   IEEE80211_MLME_UNAUTHORIZE, 0, addr);
+}
 #else /* HOSTAPD */
 
 static int
@@ -1086,9 +1113,9 @@ wpa_driver_bsd_associate(void *priv, struct wpa_driver_associate_params *params)
 	if (wpa_driver_bsd_set_wpa_ie(drv, params->wpa_ie, params->wpa_ie_len) < 0)
 		return -1;
 
-	privacy = !(params->pairwise_suite == CIPHER_NONE &&
-	    params->group_suite == CIPHER_NONE &&
-	    params->key_mgmt_suite == KEY_MGMT_NONE &&
+	privacy = !(params->pairwise_suite == WPA_CIPHER_NONE &&
+	    params->group_suite == WPA_CIPHER_NONE &&
+	    params->key_mgmt_suite == WPA_KEY_MGMT_NONE &&
 	    params->wpa_ie_len == 0);
 	wpa_printf(MSG_DEBUG, "%s: set PRIVACY %u", __func__, privacy);
 
@@ -1201,7 +1228,6 @@ static void
 wpa_driver_bsd_event_receive(int sock, void *ctx, void *sock_ctx)
 {
 	struct bsd_driver_data *drv = sock_ctx;
-	char *buf;
 	struct if_announcemsghdr *ifan;
 	struct if_msghdr *ifm;
 	struct rt_msghdr *rtm;
@@ -1209,30 +1235,20 @@ wpa_driver_bsd_event_receive(int sock, void *ctx, void *sock_ctx)
 	struct ieee80211_michael_event *mic;
 	struct ieee80211_leave_event *leave;
 	struct ieee80211_join_event *join;
-	int n, len;
+	int n;
 
-	len = rtbuf_len();
-
-	buf = os_malloc(len);
-	if (buf == NULL) {
-		wpa_printf(MSG_ERROR, "%s os_malloc() failed\n", __func__);
-		return;
-	}
-
-	n = read(sock, buf, len);
+	n = read(sock, drv->event_buf, drv->event_buf_len);
 	if (n < 0) {
 		if (errno != EINTR && errno != EAGAIN)
 			wpa_printf(MSG_ERROR, "%s read() failed: %s\n",
 				   __func__, strerror(errno));
-		os_free(buf);
 		return;
 	}
 
-	rtm = (struct rt_msghdr *) buf;
+	rtm = (struct rt_msghdr *) drv->event_buf;
 	if (rtm->rtm_version != RTM_VERSION) {
 		wpa_printf(MSG_DEBUG, "Invalid routing message version=%d",
 			   rtm->rtm_version);
-		os_free(buf);
 		return;
 	}
 	os_memset(&event, 0, sizeof(event));
@@ -1247,7 +1263,6 @@ wpa_driver_bsd_event_receive(int sock, void *ctx, void *sock_ctx)
 		case IFAN_DEPARTURE:
 			event.interface_status.ievent = EVENT_INTERFACE_REMOVED;
 		default:
-			os_free(buf);
 			return;
 		}
 		wpa_printf(MSG_DEBUG, "RTM_IFANNOUNCE: Interface '%s' %s",
@@ -1320,7 +1335,6 @@ wpa_driver_bsd_event_receive(int sock, void *ctx, void *sock_ctx)
 		}
 		break;
 	}
-	os_free(buf);
 }
 #endif	// !__HAIKU__
 
@@ -1350,6 +1364,11 @@ wpa_driver_bsd_add_scan_entry(struct wpa_scan_results *res,
 	result->caps = sr->isr_capinfo;
 	result->qual = sr->isr_rssi;
 	result->noise = sr->isr_noise;
+	/*
+	 * the rssi value reported by the kernel is in 0.5dB steps relative to
+	 * the reported noise floor. see ieee80211_node.h for details.
+	 */
+	result->level = sr->isr_rssi / 2 + sr->isr_noise;
 
 	pos = (u8 *)(result + 1);
 
@@ -1491,6 +1510,33 @@ static int wpa_driver_bsd_capa(struct bsd_driver_data *drv)
 	return 0;
 }
 
+static enum ieee80211_opmode
+get80211opmode(struct bsd_driver_data *drv)
+{
+	struct ifmediareq ifmr;
+
+	(void) memset(&ifmr, 0, sizeof(ifmr));
+	(void) os_strlcpy(ifmr.ifm_name, drv->ifname, sizeof(ifmr.ifm_name));
+
+	if (ioctl(drv->sock, SIOCGIFMEDIA, (caddr_t)&ifmr) >= 0) {
+		if (ifmr.ifm_current & IFM_IEEE80211_ADHOC) {
+			if (ifmr.ifm_current & IFM_FLAG0)
+				return IEEE80211_M_AHDEMO;
+			else
+				return IEEE80211_M_IBSS;
+		}
+		if (ifmr.ifm_current & IFM_IEEE80211_HOSTAP)
+			return IEEE80211_M_HOSTAP;
+		if (ifmr.ifm_current & IFM_IEEE80211_MONITOR)
+			return IEEE80211_M_MONITOR;
+#ifdef IEEE80211_M_MBSS
+		if (ifmr.ifm_current & IFM_IEEE80211_MBSS)
+			return IEEE80211_M_MBSS;
+#endif /* IEEE80211_M_MBSS */
+	}
+	return IEEE80211_M_STA;
+}
+
 static void *
 wpa_driver_bsd_init(void *ctx, const char *ifname)
 {
@@ -1501,6 +1547,17 @@ wpa_driver_bsd_init(void *ctx, const char *ifname)
 	drv = os_zalloc(sizeof(*drv));
 	if (drv == NULL)
 		return NULL;
+
+#ifndef __HAIKU__
+	drv->event_buf_len = rtbuf_len();
+
+	drv->event_buf = os_malloc(drv->event_buf_len);
+	if (drv->event_buf == NULL) {
+		wpa_printf(MSG_ERROR, "%s: os_malloc() failed", __func__);
+		goto fail1;
+	}
+#endif // !__HAIKU__
+
 	/*
 	 * NB: We require the interface name be mappable to an index.
 	 *     This implies we do not support having wpa_supplicant
@@ -1516,6 +1573,12 @@ wpa_driver_bsd_init(void *ctx, const char *ifname)
 	drv->sock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (drv->sock < 0)
 		goto fail1;
+
+	os_strlcpy(drv->ifname, ifname, sizeof(drv->ifname));
+	/* Down interface during setup. */
+	if (bsd_ctrl_iface(drv, 0) < 0)
+		goto fail;
+
 #ifndef __HAIKU__
 	drv->route = socket(PF_ROUTE, SOCK_RAW, 0);
 	if (drv->route < 0)
@@ -1530,11 +1593,6 @@ wpa_driver_bsd_init(void *ctx, const char *ifname)
 #endif
 
 	drv->ctx = ctx;
-	os_strlcpy(drv->ifname, ifname, sizeof(drv->ifname));
-
-	/* Down interface during setup. */
-	if (bsd_ctrl_iface(drv, 0) < 0)
-		goto fail;
 
 	if (!GETPARAM(drv, IEEE80211_IOC_ROAMING, drv->prev_roaming)) {
 		wpa_printf(MSG_DEBUG, "%s: failed to get roaming state: %s",
@@ -1555,10 +1613,15 @@ wpa_driver_bsd_init(void *ctx, const char *ifname)
 	if (wpa_driver_bsd_capa(drv))
 		goto fail;
 
+	drv->opmode = get80211opmode(drv);
+
 	return drv;
 fail:
 	close(drv->sock);
 fail1:
+#ifndef __HAIKU__
+	os_free(drv->event_buf);
+#endif
 	os_free(drv);
 	return NULL;
 #undef GETPARAM
@@ -1590,6 +1653,9 @@ wpa_driver_bsd_deinit(void *priv)
 	(void) close(drv->route);		/* ioctl socket */
 #endif
 	(void) close(drv->sock);		/* event socket */
+#ifndef __HAIKU__
+	os_free(drv->event_buf);
+#endif
 	os_free(drv);
 }
 
@@ -1616,6 +1682,8 @@ const struct wpa_driver_ops wpa_driver_bsd_ops = {
 	.read_sta_data		= bsd_read_sta_driver_data,
 	.sta_disassoc		= bsd_sta_disassoc,
 	.sta_deauth		= bsd_sta_deauth,
+	.sta_set_flags		= bsd_set_sta_authorized,
+	.commit			= bsd_commit,
 #else /* HOSTAPD */
 	.init			= wpa_driver_bsd_init,
 	.deinit			= wpa_driver_bsd_deinit,
@@ -1634,6 +1702,5 @@ const struct wpa_driver_ops wpa_driver_bsd_ops = {
 	.hapd_set_ssid		= bsd_set_ssid,
 	.hapd_get_ssid		= bsd_get_ssid,
 	.hapd_send_eapol	= bsd_send_eapol,
-	.sta_set_flags		= bsd_set_sta_authorized,
 	.set_generic_elem	= bsd_set_opt_ie,
 };

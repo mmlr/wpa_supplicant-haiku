@@ -26,6 +26,7 @@ struct wpa_state_machine {
 	struct wpa_group *group;
 
 	u8 addr[ETH_ALEN];
+	u8 p2p_dev_addr[ETH_ALEN];
 
 	enum {
 		WPA_PTK_INITIALIZE, WPA_PTK_DISCONNECT, WPA_PTK_DISCONNECTED,
@@ -120,6 +121,10 @@ struct wpa_state_machine {
 #endif /* CONFIG_IEEE80211R */
 
 	int pending_1_of_4_timeout;
+
+#ifdef CONFIG_P2P
+	u8 ip_addr[4];
+#endif /* CONFIG_P2P */
 };
 
 
@@ -138,7 +143,8 @@ struct wpa_group {
 
 	enum {
 		WPA_GROUP_GTK_INIT = 0,
-		WPA_GROUP_SETKEYS, WPA_GROUP_SETKEYSDONE
+		WPA_GROUP_SETKEYS, WPA_GROUP_SETKEYSDONE,
+		WPA_GROUP_FATAL_FAILURE
 	} wpa_group_state;
 
 	u8 GMK[WPA_GMK_LEN];
@@ -183,6 +189,10 @@ struct wpa_authenticator {
 
 	struct rsn_pmksa_cache *pmksa;
 	struct wpa_ft_pmk_cache *ft_pmk_cache;
+
+#ifdef CONFIG_P2P
+	struct bitfield *ip_pool;
+#endif /* CONFIG_P2P */
 };
 
 

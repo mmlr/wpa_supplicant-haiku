@@ -159,6 +159,21 @@ void offchannel_send_action_tx_status(
 		return;
 	}
 
+	/* Accept report only if the contents of the frame matches */
+	if (data_len - wpabuf_len(wpa_s->pending_action_tx) != 24 ||
+	    os_memcmp(data + 24, wpabuf_head(wpa_s->pending_action_tx),
+		      wpabuf_len(wpa_s->pending_action_tx)) != 0) {
+		wpa_printf(MSG_DEBUG, "Off-channel: Ignore Action TX status - "
+				   "mismatching contents with pending frame");
+		wpa_hexdump(MSG_MSGDUMP, "TX status frame data",
+			    data, data_len);
+		wpa_hexdump_buf(MSG_MSGDUMP, "Pending TX frame",
+				wpa_s->pending_action_tx);
+		return;
+	}
+
+	wpa_printf(MSG_DEBUG, "Off-channel: Delete matching pending action frame");
+
 	wpabuf_free(wpa_s->pending_action_tx);
 	wpa_s->pending_action_tx = NULL;
 
@@ -285,6 +300,8 @@ int offchannel_send_action(struct wpa_supplicant *wpa_s, unsigned int freq,
 		   "channel");
 	if (wait_time > wpa_s->max_remain_on_chan)
 		wait_time = wpa_s->max_remain_on_chan;
+	else if (wait_time == 0)
+		wait_time = 20;
 	if (wpa_drv_remain_on_channel(wpa_s, freq, wait_time) < 0) {
 		wpa_printf(MSG_DEBUG, "Off-channel: Failed to request driver "
 			   "to remain on channel (%u MHz) for Action "

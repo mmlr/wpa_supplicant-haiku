@@ -18,6 +18,7 @@
 #ifdef CONFIG_WPS_TESTING
 int wps_version_number = 0x20;
 int wps_testing_dummy_cred = 0;
+int wps_corrupt_pkhash = 0;
 #endif /* CONFIG_WPS_TESTING */
 
 
@@ -53,12 +54,22 @@ struct wps_data * wps_init(const struct wps_config *cfg)
 		}
 		os_memcpy(data->dev_password, cfg->pin, cfg->pin_len);
 		data->dev_password_len = cfg->pin_len;
+		wpa_hexdump_key(MSG_DEBUG, "WPS: AP PIN dev_password",
+				data->dev_password, data->dev_password_len);
 	}
 
 #ifdef CONFIG_WPS_NFC
+	if (cfg->pin == NULL &&
+	    cfg->dev_pw_id == DEV_PW_NFC_CONNECTION_HANDOVER)
+		data->dev_pw_id = cfg->dev_pw_id;
+
 	if (cfg->wps->ap && !cfg->registrar && cfg->wps->ap_nfc_dev_pw_id) {
+		/* Keep AP PIN as alternative Device Password */
+		data->alt_dev_pw_id = data->dev_pw_id;
+		data->alt_dev_password = data->dev_password;
+		data->alt_dev_password_len = data->dev_password_len;
+
 		data->dev_pw_id = cfg->wps->ap_nfc_dev_pw_id;
-		os_free(data->dev_password);
 		data->dev_password =
 			os_malloc(wpabuf_len(cfg->wps->ap_nfc_dev_pw));
 		if (data->dev_password == NULL) {
@@ -69,6 +80,8 @@ struct wps_data * wps_init(const struct wps_config *cfg)
 			  wpabuf_head(cfg->wps->ap_nfc_dev_pw),
 			  wpabuf_len(cfg->wps->ap_nfc_dev_pw));
 		data->dev_password_len = wpabuf_len(cfg->wps->ap_nfc_dev_pw);
+		wpa_hexdump_key(MSG_DEBUG, "WPS: NFC dev_password",
+			    data->dev_password, data->dev_password_len);
 	}
 #endif /* CONFIG_WPS_NFC */
 
@@ -125,6 +138,12 @@ struct wps_data * wps_init(const struct wps_config *cfg)
 	data->use_psk_key = cfg->use_psk_key;
 	data->pbc_in_m1 = cfg->pbc_in_m1;
 
+	if (cfg->peer_pubkey_hash) {
+		os_memcpy(data->peer_pubkey_hash, cfg->peer_pubkey_hash,
+			  WPS_OOB_PUBKEY_HASH_LEN);
+		data->peer_pubkey_hash_set = 1;
+	}
+
 	return data;
 }
 
@@ -155,11 +174,11 @@ void wps_deinit(struct wps_data *data)
 	wpabuf_free(data->dh_pubkey_r);
 	wpabuf_free(data->last_msg);
 	os_free(data->dev_password);
+	os_free(data->alt_dev_password);
 	os_free(data->new_psk);
 	wps_device_data_free(&data->peer_dev);
 	os_free(data->new_ap_settings);
 	dh5_free(data->dh_ctx);
-	os_free(data->nfc_pw_token);
 	os_free(data);
 }
 
@@ -488,7 +507,7 @@ struct wpabuf * wps_build_probe_req_ie(u16 pw_id, struct wps_device_data *dev,
 	    wps_build_config_methods(ie, dev->config_methods) ||
 	    wps_build_uuid_e(ie, uuid) ||
 	    wps_build_primary_dev_type(dev, ie) ||
-	    wps_build_rf_bands(dev, ie) ||
+	    wps_build_rf_bands(dev, ie, 0) ||
 	    wps_build_assoc_state(NULL, ie) ||
 	    wps_build_config_error(ie, WPS_CFG_NO_ERROR) ||
 	    wps_build_dev_password_id(ie, pw_id) ||
@@ -630,4 +649,21 @@ int wps_attr_text(struct wpabuf *data, char *buf, char *end)
 	}
 
 	return pos - buf;
+}
+
+
+const char * wps_ei_str(enum wps_error_indication ei)
+{
+	switch (ei) {
+	case WPS_EI_NO_ERROR:
+		return "No Error";
+	case WPS_EI_SECURITY_TKIP_ONLY_PROHIBITED:
+		return "TKIP Only Prohibited";
+	case WPS_EI_SECURITY_WEP_PROHIBITED:
+		return "WEP Prohibited";
+	case WPS_EI_AUTH_FAILURE:
+		return "Authentication Failure";
+	default:
+		return "Unknown";
+	}
 }

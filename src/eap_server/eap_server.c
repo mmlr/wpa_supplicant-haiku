@@ -343,6 +343,7 @@ SM_STATE(EAP, PROPOSE_METHOD)
 
 	SM_ENTRY(EAP, PROPOSE_METHOD);
 
+try_another_method:
 	type = eap_sm_Policy_getNextMethod(sm, &vendor);
 	if (vendor == EAP_VENDOR_IETF)
 		sm->currentMethod = type;
@@ -360,7 +361,13 @@ SM_STATE(EAP, PROPOSE_METHOD)
 				   "method %d", sm->currentMethod);
 			sm->m = NULL;
 			sm->currentMethod = EAP_TYPE_NONE;
+			goto try_another_method;
 		}
+	}
+	if (sm->m == NULL) {
+		wpa_printf(MSG_DEBUG, "EAP: Could not find suitable EAP method");
+		sm->decision = DECISION_FAILURE;
+		return;
 	}
 	if (sm->currentMethod == EAP_TYPE_IDENTITY ||
 	    sm->currentMethod == EAP_TYPE_NOTIFICATION)
@@ -702,6 +709,15 @@ SM_STEP(EAP)
 			SM_ENTER(EAP, METHOD_RESPONSE);
 		break;
 	case EAP_METHOD_REQUEST:
+		if (sm->m == NULL) {
+			/*
+			 * This transition is not mentioned in RFC 4137, but it
+			 * is needed to handle cleanly a case where EAP method
+			 * initialization fails.
+			 */
+			SM_ENTER(EAP, FAILURE);
+			break;
+		}
 		SM_ENTER(EAP, SEND_REQUEST);
 		break;
 	case EAP_METHOD_RESPONSE:
@@ -1278,6 +1294,8 @@ struct eap_sm * eap_server_sm_init(void *eapol_ctx,
 	sm->fragment_size = conf->fragment_size;
 	sm->pwd_group = conf->pwd_group;
 	sm->pbc_in_m1 = conf->pbc_in_m1;
+	sm->server_id = conf->server_id;
+	sm->server_id_len = conf->server_id_len;
 
 	wpa_printf(MSG_DEBUG, "EAP: Server state machine created");
 

@@ -31,7 +31,7 @@ struct eloop_sock {
 
 struct eloop_timeout {
 	struct dl_list list;
-	struct os_time time;
+	struct os_reltime time;
 	void *eloop_data;
 	void *user_data;
 	eloop_timeout_handler handler;
@@ -484,7 +484,7 @@ int eloop_register_timeout(unsigned int secs, unsigned int usecs,
 	timeout = os_zalloc(sizeof(*timeout));
 	if (timeout == NULL)
 		return -1;
-	if (os_get_time(&timeout->time) < 0) {
+	if (os_get_reltime(&timeout->time) < 0) {
 		os_free(timeout);
 		return -1;
 	}
@@ -514,7 +514,7 @@ int eloop_register_timeout(unsigned int secs, unsigned int usecs,
 
 	/* Maintain timeouts in order of increasing time */
 	dl_list_for_each(tmp, &eloop.timeout, struct eloop_timeout, list) {
-		if (os_time_before(&timeout->time, &tmp->time)) {
+		if (os_reltime_before(&timeout->time, &tmp->time)) {
 			dl_list_add(tmp->list.prev, &timeout->list);
 			return 0;
 		}
@@ -556,6 +556,33 @@ int eloop_cancel_timeout(eloop_timeout_handler handler,
 }
 
 
+int eloop_cancel_timeout_one(eloop_timeout_handler handler,
+			     void *eloop_data, void *user_data,
+			     struct os_reltime *remaining)
+{
+	struct eloop_timeout *timeout, *prev;
+	int removed = 0;
+	struct os_reltime now;
+
+	os_get_reltime(&now);
+	remaining->sec = remaining->usec = 0;
+
+	dl_list_for_each_safe(timeout, prev, &eloop.timeout,
+			      struct eloop_timeout, list) {
+		if (timeout->handler == handler &&
+		    (timeout->eloop_data == eloop_data) &&
+		    (timeout->user_data == user_data)) {
+			removed = 1;
+			if (os_reltime_before(&now, &timeout->time))
+				os_reltime_sub(&timeout->time, &now, remaining);
+			eloop_remove_timeout(timeout);
+			break;
+		}
+	}
+	return removed;
+}
+
+
 int eloop_is_timeout_registered(eloop_timeout_handler handler,
 				void *eloop_data, void *user_data)
 {
@@ -569,6 +596,70 @@ int eloop_is_timeout_registered(eloop_timeout_handler handler,
 	}
 
 	return 0;
+}
+
+
+int eloop_deplete_timeout(unsigned int req_secs, unsigned int req_usecs,
+			  eloop_timeout_handler handler, void *eloop_data,
+			  void *user_data)
+{
+	struct os_reltime now, requested, remaining;
+	struct eloop_timeout *tmp;
+
+	dl_list_for_each(tmp, &eloop.timeout, struct eloop_timeout, list) {
+		if (tmp->handler == handler &&
+		    tmp->eloop_data == eloop_data &&
+		    tmp->user_data == user_data) {
+			requested.sec = req_secs;
+			requested.usec = req_usecs;
+			os_get_reltime(&now);
+			os_reltime_sub(&tmp->time, &now, &remaining);
+			if (os_reltime_before(&requested, &remaining)) {
+				eloop_cancel_timeout(handler, eloop_data,
+						     user_data);
+				eloop_register_timeout(requested.sec,
+						       requested.usec,
+						       handler, eloop_data,
+						       user_data);
+				return 1;
+			}
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+
+int eloop_replenish_timeout(unsigned int req_secs, unsigned int req_usecs,
+			    eloop_timeout_handler handler, void *eloop_data,
+			    void *user_data)
+{
+	struct os_reltime now, requested, remaining;
+	struct eloop_timeout *tmp;
+
+	dl_list_for_each(tmp, &eloop.timeout, struct eloop_timeout, list) {
+		if (tmp->handler == handler &&
+		    tmp->eloop_data == eloop_data &&
+		    tmp->user_data == user_data) {
+			requested.sec = req_secs;
+			requested.usec = req_usecs;
+			os_get_reltime(&now);
+			os_reltime_sub(&tmp->time, &now, &remaining);
+			if (os_reltime_before(&remaining, &requested)) {
+				eloop_cancel_timeout(handler, eloop_data,
+						     user_data);
+				eloop_register_timeout(requested.sec,
+						       requested.usec,
+						       handler, eloop_data,
+						       user_data);
+				return 1;
+			}
+			return 0;
+		}
+	}
+
+	return -1;
 }
 
 
@@ -687,7 +778,7 @@ void eloop_run(void)
 	struct timeval _tv;
 #endif /* CONFIG_ELOOP_POLL */
 	int res;
-	struct os_time tv, now;
+	struct os_reltime tv, now;
 
 #ifndef CONFIG_ELOOP_POLL
 	rfds = os_malloc(sizeof(*rfds));
@@ -704,9 +795,9 @@ void eloop_run(void)
 		timeout = dl_list_first(&eloop.timeout, struct eloop_timeout,
 					list);
 		if (timeout) {
-			os_get_time(&now);
-			if (os_time_before(&now, &timeout->time))
-				os_time_sub(&timeout->time, &now, &tv);
+			os_get_reltime(&now);
+			if (os_reltime_before(&now, &timeout->time))
+				os_reltime_sub(&timeout->time, &now, &tv);
 			else
 				tv.sec = tv.usec = 0;
 #ifdef CONFIG_ELOOP_POLL
@@ -726,7 +817,8 @@ void eloop_run(void)
 			   timeout ? timeout_ms : -1);
 
 		if (res < 0 && errno != EINTR && errno != 0) {
-			perror("poll");
+			wpa_printf(MSG_INFO, "eloop: poll: %s",
+				   strerror(errno));
 			goto out;
 		}
 #else /* CONFIG_ELOOP_POLL */
@@ -736,7 +828,8 @@ void eloop_run(void)
 		res = select(eloop.max_sock + 1, rfds, wfds, efds,
 			     timeout ? &_tv : NULL);
 		if (res < 0 && errno != EINTR && errno != 0) {
-			perror("select");
+			wpa_printf(MSG_INFO, "eloop: select: %s",
+				   strerror(errno));
 			goto out;
 		}
 #endif /* CONFIG_ELOOP_POLL */
@@ -746,8 +839,8 @@ void eloop_run(void)
 		timeout = dl_list_first(&eloop.timeout, struct eloop_timeout,
 					list);
 		if (timeout) {
-			os_get_time(&now);
-			if (!os_time_before(&now, &timeout->time)) {
+			os_get_reltime(&now);
+			if (!os_reltime_before(&now, &timeout->time)) {
 				void *eloop_data = timeout->eloop_data;
 				void *user_data = timeout->user_data;
 				eloop_timeout_handler handler =
@@ -772,6 +865,7 @@ void eloop_run(void)
 #endif /* CONFIG_ELOOP_POLL */
 	}
 
+	eloop.terminate = 0;
 out:
 #ifndef CONFIG_ELOOP_POLL
 	os_free(rfds);
@@ -791,9 +885,9 @@ void eloop_terminate(void)
 void eloop_destroy(void)
 {
 	struct eloop_timeout *timeout, *prev;
-	struct os_time now;
+	struct os_reltime now;
 
-	os_get_time(&now);
+	os_get_reltime(&now);
 	dl_list_for_each_safe(timeout, prev, &eloop.timeout,
 			      struct eloop_timeout, list) {
 		int sec, usec;

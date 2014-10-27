@@ -24,6 +24,7 @@
 #define DEFAULT_BSS_EXPIRATION_SCAN_COUNT 2
 #define DEFAULT_MAX_NUM_STA 128
 #define DEFAULT_ACCESS_NETWORK_TYPE 15
+#define DEFAULT_SCAN_CUR_FREQ 0
 
 #include "config_ssid.h"
 #include "wps/wps.h"
@@ -49,6 +50,11 @@ struct wpa_cred {
 	 * control interface.
 	 */
 	int id;
+
+	/**
+	 * temporary - Whether this credential is temporary and not to be saved
+	 */
+	int temporary;
 
 	/**
 	 * priority - Priority group
@@ -149,12 +155,37 @@ struct wpa_cred {
 	char *milenage;
 
 	/**
-	 * domain - Home service provider FQDN
+	 * domain_suffix_match - Constraint for server domain name
+	 *
+	 * If set, this FQDN is used as a suffix match requirement for the AAA
+	 * server certificate in SubjectAltName dNSName element(s). If a
+	 * matching dNSName is found, this constraint is met. If no dNSName
+	 * values are present, this constraint is matched against SubjetName CN
+	 * using same suffix match comparison. Suffix match here means that the
+	 * host/domain name is compared one label at a time starting from the
+	 * top-level domain and all the labels in @domain_suffix_match shall be
+	 * included in the certificate. The certificate may include additional
+	 * sub-level labels in addition to the required labels.
+	 *
+	 * For example, domain_suffix_match=example.com would match
+	 * test.example.com but would not match test-example.com.
+	 */
+	char *domain_suffix_match;
+
+	/**
+	 * domain - Home service provider FQDN(s)
 	 *
 	 * This is used to compare against the Domain Name List to figure out
-	 * whether the AP is operated by the Home SP.
+	 * whether the AP is operated by the Home SP. Multiple domain entries
+	 * can be used to configure alternative FQDNs that will be considered
+	 * home networks.
 	 */
-	char *domain;
+	char **domain;
+
+	/**
+	 * num_domain - Number of FQDNs in the domain array
+	 */
+	size_t num_domain;
 
 	/**
 	 * roaming_consortium - Roaming Consortium OI
@@ -173,6 +204,9 @@ struct wpa_cred {
 	 * roaming_consortium_len - Length of roaming_consortium
 	 */
 	size_t roaming_consortium_len;
+
+	u8 required_roaming_consortium[15];
+	size_t required_roaming_consortium_len;
 
 	/**
 	 * eap_method - EAP method to use
@@ -220,6 +254,7 @@ struct wpa_cred {
 #define CFG_CHANGED_P2P_OPER_CHANNEL BIT(12)
 #define CFG_CHANGED_P2P_PREF_CHAN BIT(13)
 #define CFG_CHANGED_EXT_PW_BACKEND BIT(14)
+#define CFG_CHANGED_NFC_PASSWORD_TOKEN BIT(15)
 
 /**
  * struct wpa_config - wpa_supplicant configuration data
@@ -297,6 +332,18 @@ struct wpa_config {
 	 * option in the lists) for key_mgmt, pairwise, group, proto variables.
 	 */
 	int ap_scan;
+
+	/**
+	 * bgscan - Background scan and roaming parameters or %NULL if none
+	 *
+	 * This is an optional set of parameters for background scanning and
+	 * roaming within a network (ESS). For more detailed information see
+	 * ssid block documentation.
+	 *
+	 * The variable defines default bgscan behavior for all BSS station
+	 * networks except for those which have their own bgscan configuration.
+	 */
+	 char *bgscan;
 
 	/**
 	 * disable_scan_offload - Disable automatic offloading of scan requests
@@ -421,6 +468,11 @@ struct wpa_config {
 	 * EAP-AKA. If left out, this will be asked through control interface.
 	 */
 	char *pcsc_pin;
+
+	/**
+	 * external_sim - Use external processing for SIM/USIM operations
+	 */
+	int external_sim;
 
 	/**
 	 * driver_param - Driver interface parameters
@@ -570,6 +622,9 @@ struct wpa_config {
 	int p2p_intra_bss;
 	unsigned int num_p2p_pref_chan;
 	struct p2p_channel *p2p_pref_chan;
+	struct wpa_freq_range_list p2p_no_go_freq;
+	int p2p_add_cli_chan;
+	int p2p_ignore_shared_freq;
 
 	struct wpabuf *wps_vendor_ext_m1;
 
@@ -643,6 +698,22 @@ struct wpa_config {
 	unsigned int max_num_sta;
 
 	/**
+	 * freq_list - Array of allowed scan frequencies or %NULL for all
+	 *
+	 * This is an optional zero-terminated array of frequencies in
+	 * megahertz (MHz) to allow for narrowing scanning range.
+	 */
+	int *freq_list;
+
+	/**
+	 * scan_cur_freq - Whether to scan only the current channel
+	 *
+	 * If true, attempt to scan only the current channel if any other
+	 * VIFs on this radio are already associated on a particular channel.
+	 */
+	int scan_cur_freq;
+
+	/**
 	 * changed_parameters - Bitmap of changed parameters since last update
 	 */
 	unsigned int changed_parameters;
@@ -706,6 +777,15 @@ struct wpa_config {
 	char *autoscan;
 
 	/**
+	 * wps_nfc_pw_from_config - NFC Device Password was read from config
+	 *
+	 * This parameter can be determined whether the NFC Device Password was
+	 * included in the configuration (1) or generated dynamically (0). Only
+	 * the former case is re-written back to the configuration file.
+	 */
+	int wps_nfc_pw_from_config;
+
+	/**
 	 * wps_nfc_dev_pw_id - NFC Device Password ID for password token
 	 */
 	int wps_nfc_dev_pw_id;
@@ -765,6 +845,16 @@ struct wpa_config {
 	int p2p_go_ht40;
 
 	/**
+	 * p2p_go_vht - Default mode for VHT enable when operating as GO
+	 *
+	 * This will take effect for p2p_group_add, p2p_connect, and p2p_invite.
+	 * Note that regulatory constraints and driver capabilities are
+	 * consulted anyway, so setting it to 1 can't do real harm.
+	 * By default: 0 (disabled)
+	 */
+	int p2p_go_vht;
+
+	/**
 	 * p2p_disabled - Whether P2P operations are disabled for this interface
 	 */
 	int p2p_disabled;
@@ -797,6 +887,72 @@ struct wpa_config {
 	 * this default behavior.
 	 */
 	enum mfp_options pmf;
+
+	/**
+	 * sae_groups - Preference list of enabled groups for SAE
+	 *
+	 * By default (if this parameter is not set), the mandatory group 19
+	 * (ECC group defined over a 256-bit prime order field) is preferred,
+	 * but other groups are also enabled. If this parameter is set, the
+	 * groups will be tried in the indicated order.
+	 */
+	int *sae_groups;
+
+	/**
+	 * dtim_period - Default DTIM period in Beacon intervals
+	 *
+	 * This parameter can be used to set the default value for network
+	 * blocks that do not specify dtim_period.
+	 */
+	int dtim_period;
+
+	/**
+	 * beacon_int - Default Beacon interval in TU
+	 *
+	 * This parameter can be used to set the default value for network
+	 * blocks that do not specify beacon_int.
+	 */
+	int beacon_int;
+
+	/**
+	 * ap_vendor_elements: Vendor specific elements for Beacon/ProbeResp
+	 *
+	 * This parameter can be used to define additional vendor specific
+	 * elements for Beacon and Probe Response frames in AP/P2P GO mode. The
+	 * format for these element(s) is a hexdump of the raw information
+	 * elements (id+len+payload for one or more elements).
+	 */
+	struct wpabuf *ap_vendor_elements;
+
+	/**
+	 * ignore_old_scan_res - Ignore scan results older than request
+	 *
+	 * The driver may have a cache of scan results that makes it return
+	 * information that is older than our scan trigger. This parameter can
+	 * be used to configure such old information to be ignored instead of
+	 * allowing it to update the internal BSS table.
+	 */
+	int ignore_old_scan_res;
+
+	/**
+	 * sched_scan_interval -  schedule scan interval
+	 */
+	unsigned int sched_scan_interval;
+
+	/**
+	 * tdls_external_control - External control for TDLS setup requests
+	 *
+	 * Enable TDLS mode where external programs are given the control
+	 * to specify the TDLS link to get established to the driver. The
+	 * driver requests the TDLS setup to the supplicant only for the
+	 * specified TDLS peers.
+	 */
+	int tdls_external_control;
+
+	u8 ip_addr_go[4];
+	u8 ip_addr_mask[4];
+	u8 ip_addr_start[4];
+	u8 ip_addr_end[4];
 };
 
 
@@ -828,6 +984,7 @@ void wpa_config_set_blob(struct wpa_config *config,
 			 struct wpa_config_blob *blob);
 void wpa_config_free_blob(struct wpa_config_blob *blob);
 int wpa_config_remove_blob(struct wpa_config *config, const char *name);
+void wpa_config_flush_blobs(struct wpa_config *config);
 
 struct wpa_cred * wpa_config_get_cred(struct wpa_config *config, int id);
 struct wpa_cred * wpa_config_add_cred(struct wpa_config *config);
@@ -855,6 +1012,7 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line);
  * wpa_config_read - Read and parse configuration database
  * @name: Name of the configuration (e.g., path and file name for the
  * configuration file)
+ * @cfgp: Pointer to previously allocated configuration data or %NULL if none
  * Returns: Pointer to allocated configuration data or %NULL on failure
  *
  * This function reads configuration data, parses its contents, and allocates
@@ -863,7 +1021,7 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line);
  *
  * Each configuration backend needs to implement this function.
  */
-struct wpa_config * wpa_config_read(const char *name);
+struct wpa_config * wpa_config_read(const char *name, struct wpa_config *cfgp);
 
 /**
  * wpa_config_write - Write or update configuration data

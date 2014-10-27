@@ -161,6 +161,7 @@
 #define WLAN_STATUS_ANTI_CLOGGING_TOKEN_REQ 76
 #define WLAN_STATUS_FINITE_CYCLIC_GROUP_NOT_SUPPORTED 77
 #define WLAN_STATUS_TRANSMISSION_FAILURE 79
+#define WLAN_STATUS_ASSOC_DENIED_NO_VHT 104
 
 /* Reason codes (IEEE 802.11-2007, 7.3.1.7, Table 7-22) */
 #define WLAN_REASON_UNSPECIFIED 1
@@ -203,6 +204,7 @@
 #define WLAN_EID_TIM 5
 #define WLAN_EID_IBSS_PARAMS 6
 #define WLAN_EID_COUNTRY 7
+#define WLAN_EID_BSS_LOAD 11
 #define WLAN_EID_CHALLENGE 16
 /* EIDs defined by IEEE 802.11h - START */
 #define WLAN_EID_PWR_CONSTRAINT 32
@@ -218,12 +220,14 @@
 /* EIDs defined by IEEE 802.11h - END */
 #define WLAN_EID_ERP_INFO 42
 #define WLAN_EID_HT_CAP 45
+#define WLAN_EID_QOS 46
 #define WLAN_EID_RSN 48
 #define WLAN_EID_EXT_SUPP_RATES 50
 #define WLAN_EID_MOBILITY_DOMAIN 54
 #define WLAN_EID_FAST_BSS_TRANSITION 55
 #define WLAN_EID_TIMEOUT_INTERVAL 56
 #define WLAN_EID_RIC_DATA 57
+#define WLAN_EID_SUPPORTED_OPERATING_CLASSES 59
 #define WLAN_EID_HT_OPERATION 61
 #define WLAN_EID_SECONDARY_CHANNEL_OFFSET 62
 #define WLAN_EID_WAPI 68
@@ -241,6 +245,7 @@
 #define WLAN_EID_LINK_ID 101
 #define WLAN_EID_INTERWORKING 107
 #define WLAN_EID_ADV_PROTO 108
+#define WLAN_EID_QOS_MAP_SET 110
 #define WLAN_EID_ROAMING_CONSORTIUM 111
 #define WLAN_EID_EXT_CAPAB 127
 #define WLAN_EID_CCKM 156
@@ -266,6 +271,7 @@
 #define WLAN_ACTION_FT 6
 #define WLAN_ACTION_HT 7
 #define WLAN_ACTION_SA_QUERY 8
+#define WLAN_ACTION_PROTECTED_DUAL 9
 #define WLAN_ACTION_WNM 10
 #define WLAN_ACTION_UNPROTECTED_WNM 11
 #define WLAN_ACTION_TDLS 12
@@ -280,6 +286,19 @@
 #define WLAN_PA_GAS_COMEBACK_REQ 12
 #define WLAN_PA_GAS_COMEBACK_RESP 13
 #define WLAN_TDLS_DISCOVERY_RESPONSE 14
+
+/* Protected Dual of Public Action frames */
+#define WLAN_PROT_DSE_ENABLEMENT 1
+#define WLAN_PROT_DSE_DEENABLEMENT 2
+#define WLAN_PROT_EXT_CSA 4
+#define WLAN_PROT_MEASUREMENT_REQ 5
+#define WLAN_PROT_MEASUREMENT_REPORT 6
+#define WLAN_PROT_DSE_POWER_CONSTRAINT 8
+#define WLAN_PROT_VENDOR_SPECIFIC 9
+#define WLAN_PROT_GAS_INITIAL_REQ 10
+#define WLAN_PROT_GAS_INITIAL_RESP 11
+#define WLAN_PROT_GAS_COMEBACK_REQ 12
+#define WLAN_PROT_GAS_COMEBACK_RESP 13
 
 /* SA Query Action frame (IEEE 802.11w/D8.0, 7.4.9) */
 #define WLAN_SA_QUERY_REQUEST 0
@@ -548,6 +567,14 @@ struct ieee80211_mgmt {
 					 * Entries (optional) */
 					u8 variable[0];
 				} STRUCT_PACKED bss_tm_resp;
+				struct {
+					u8 action; /* 6 */
+					u8 dialog_token;
+					u8 query_reason;
+					/* BSS Transition Candidate List
+					 * Entries (optional) */
+					u8 variable[0];
+				} STRUCT_PACKED bss_tm_query;
 			} u;
 		} STRUCT_PACKED action;
 	} u;
@@ -576,9 +603,25 @@ struct ieee80211_ht_operation {
 } STRUCT_PACKED;
 
 
+struct ieee80211_obss_scan_parameters {
+	le16 scan_passive_dwell;
+	le16 scan_active_dwell;
+	le16 width_trigger_scan_interval;
+	le16 scan_passive_total_per_channel;
+	le16 scan_active_total_per_channel;
+	le16 channel_transition_delay_factor;
+	le16 scan_activity_threshold;
+} STRUCT_PACKED;
+
+
 struct ieee80211_vht_capabilities {
 	le32 vht_capabilities_info;
-	u8 vht_supported_mcs_set[8];
+	struct {
+		le16 rx_map;
+		le16 rx_highest;
+		le16 tx_map;
+		le16 tx_highest;
+	} vht_supported_mcs_set;
 } STRUCT_PACKED;
 
 struct ieee80211_vht_operation {
@@ -688,8 +731,10 @@ struct ieee80211_vht_operation {
 /* VHT Defines */
 #define VHT_CAP_MAX_MPDU_LENGTH_7991                ((u32) BIT(0))
 #define VHT_CAP_MAX_MPDU_LENGTH_11454               ((u32) BIT(1))
+#define VHT_CAP_MAX_MPDU_LENGTH_MASK                ((u32) BIT(0) | BIT(1))
 #define VHT_CAP_SUPP_CHAN_WIDTH_160MHZ              ((u32) BIT(2))
 #define VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ     ((u32) BIT(3))
+#define VHT_CAP_SUPP_CHAN_WIDTH_MASK                ((u32) BIT(2) | BIT(3))
 #define VHT_CAP_RXLDPC                              ((u32) BIT(4))
 #define VHT_CAP_SHORT_GI_80                         ((u32) BIT(5))
 #define VHT_CAP_SHORT_GI_160                        ((u32) BIT(6))
@@ -698,19 +743,32 @@ struct ieee80211_vht_operation {
 #define VHT_CAP_RXSTBC_2                            ((u32) BIT(9))
 #define VHT_CAP_RXSTBC_3                            ((u32) BIT(8) | BIT(9))
 #define VHT_CAP_RXSTBC_4                            ((u32) BIT(10))
+#define VHT_CAP_RXSTBC_MASK                         ((u32) BIT(8) | BIT(9) | \
+							   BIT(10))
 #define VHT_CAP_SU_BEAMFORMER_CAPABLE               ((u32) BIT(11))
 #define VHT_CAP_SU_BEAMFORMEE_CAPABLE               ((u32) BIT(12))
-#define VHT_CAP_BEAMFORMER_ANTENNAS_MAX             ((u32) BIT(13) | BIT(14))
-#define VHT_CAP_SOUNDING_DIMENTION_MAX              ((u32) BIT(16) | BIT(17))
+#define VHT_CAP_BEAMFORMEE_STS_MAX                  ((u32) BIT(13) | \
+							   BIT(14) | BIT(15))
+#define VHT_CAP_BEAMFORMEE_STS_OFFSET               13
+#define VHT_CAP_SOUNDING_DIMENSION_MAX              ((u32) BIT(16) | \
+							   BIT(17) | BIT(18))
+#define VHT_CAP_SOUNDING_DIMENSION_OFFSET           16
 #define VHT_CAP_MU_BEAMFORMER_CAPABLE               ((u32) BIT(19))
 #define VHT_CAP_MU_BEAMFORMEE_CAPABLE               ((u32) BIT(20))
 #define VHT_CAP_VHT_TXOP_PS                         ((u32) BIT(21))
 #define VHT_CAP_HTC_VHT                             ((u32) BIT(22))
-#define VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT          ((u32) BIT(23))
+#define VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT          ((u32) BIT(23) | \
+							   BIT(24) | BIT(25))
 #define VHT_CAP_VHT_LINK_ADAPTATION_VHT_UNSOL_MFB   ((u32) BIT(27))
 #define VHT_CAP_VHT_LINK_ADAPTATION_VHT_MRQ_MFB     ((u32) BIT(26) | BIT(27))
 #define VHT_CAP_RX_ANTENNA_PATTERN                  ((u32) BIT(28))
 #define VHT_CAP_TX_ANTENNA_PATTERN                  ((u32) BIT(29))
+
+/* VHT channel widths */
+#define VHT_CHANWIDTH_USE_HT	0
+#define VHT_CHANWIDTH_80MHZ	1
+#define VHT_CHANWIDTH_160MHZ	2
+#define VHT_CHANWIDTH_80P80MHZ	3
 
 #define OUI_MICROSOFT 0x0050f2 /* Microsoft (also used in Wi-Fi specs)
 				* 00:50:F2 */
@@ -868,6 +926,7 @@ enum p2p_attr_id {
 	P2P_ATTR_INTERFACE = 16,
 	P2P_ATTR_OPERATING_CHANNEL = 17,
 	P2P_ATTR_INVITATION_FLAGS = 18,
+	P2P_ATTR_OOB_GO_NEG_CHANNEL = 19,
 	P2P_ATTR_VENDOR_SPECIFIC = 221
 };
 
@@ -889,6 +948,7 @@ enum p2p_attr_id {
 #define P2P_GROUP_CAPAB_CROSS_CONN BIT(4)
 #define P2P_GROUP_CAPAB_PERSISTENT_RECONN BIT(5)
 #define P2P_GROUP_CAPAB_GROUP_FORMATION BIT(6)
+#define P2P_GROUP_CAPAB_IP_ADDR_ALLOCATION BIT(7)
 
 /* Invitation Flags */
 #define P2P_INVITATION_FLAGS_TYPE BIT(0)
@@ -911,6 +971,12 @@ enum p2p_status_code {
 	P2P_SC_FAIL_BOTH_GO_INTENT_15 = 9,
 	P2P_SC_FAIL_INCOMPATIBLE_PROV_METHOD = 10,
 	P2P_SC_FAIL_REJECTED_BY_USER = 11,
+};
+
+enum p2p_role_indication {
+	P2P_DEVICE_NOT_IN_GROUP = 0x00,
+	P2P_CLIENT_IN_A_GROUP = 0x01,
+	P2P_GO_IN_A_GROUP = 0x02,
 };
 
 #define P2P_WILDCARD_SSID "DIRECT-"
@@ -982,6 +1048,11 @@ enum wifi_display_subelem {
 #define WLAN_CIPHER_SUITE_AES_CMAC	0x000FAC06
 #define WLAN_CIPHER_SUITE_NO_GROUP_ADDR	0x000FAC07
 #define WLAN_CIPHER_SUITE_GCMP		0x000FAC08
+#define WLAN_CIPHER_SUITE_GCMP_256	0x000FAC09
+#define WLAN_CIPHER_SUITE_CCMP_256	0x000FAC0A
+#define WLAN_CIPHER_SUITE_BIP_GMAC_128	0x000FAC0B
+#define WLAN_CIPHER_SUITE_BIP_GMAC_256	0x000FAC0C
+#define WLAN_CIPHER_SUITE_BIP_CMAC_256	0x000FAC0D
 
 #define WLAN_CIPHER_SUITE_SMS4		0x00147201
 
@@ -993,6 +1064,8 @@ enum wifi_display_subelem {
 /* AKM suite selectors */
 #define WLAN_AKM_SUITE_8021X		0x000FAC01
 #define WLAN_AKM_SUITE_PSK		0x000FAC02
+#define WLAN_AKM_SUITE_FT_8021X		0x000FAC03
+#define WLAN_AKM_SUITE_FT_PSK		0x000FAC04
 #define WLAN_AKM_SUITE_CCKM		0x00409600
 
 
@@ -1034,6 +1107,37 @@ enum wnm_action {
 #define WNM_BSS_TM_REQ_DISASSOC_IMMINENT BIT(2)
 #define WNM_BSS_TM_REQ_BSS_TERMINATION_INCLUDED BIT(3)
 #define WNM_BSS_TM_REQ_ESS_DISASSOC_IMMINENT BIT(4)
+
+/* IEEE Std 802.11-2012 - Table 8-253 */
+enum bss_trans_mgmt_status_code {
+	WNM_BSS_TM_ACCEPT = 0,
+	WNM_BSS_TM_REJECT_UNSPECIFIED = 1,
+	WNM_BSS_TM_REJECT_INSUFFICIENT_BEACON = 2,
+	WNM_BSS_TM_REJECT_INSUFFICIENT_CAPABITY = 3,
+	WNM_BSS_TM_REJECT_UNDESIRED = 4,
+	WNM_BSS_TM_REJECT_DELAY_REQUEST = 5,
+	WNM_BSS_TM_REJECT_STA_CANDIDATE_LIST_PROVIDED = 6,
+	WNM_BSS_TM_REJECT_NO_SUITABLE_CANDIDATES = 7,
+	WNM_BSS_TM_REJECT_LEAVING_ESS = 8
+};
+
+#define WNM_NEIGHBOR_TSF                         1
+#define WNM_NEIGHBOR_CONDENSED_COUNTRY_STRING    2
+#define WNM_NEIGHBOR_BSS_TRANSITION_CANDIDATE    3
+#define WNM_NEIGHBOR_BSS_TERMINATION_DURATION    4
+#define WNM_NEIGHBOR_BEARING                     5
+#define WNM_NEIGHBOR_MEASUREMENT_PILOT          66
+#define WNM_NEIGHBOR_RRM_ENABLED_CAPABILITIES   70
+#define WNM_NEIGHBOR_MULTIPLE_BSSID             71
+
+/* QoS action */
+enum qos_action {
+	QOS_ADDTS_REQ = 0,
+	QOS_ADDTS_RESP = 1,
+	QOS_DELTS = 2,
+	QOS_SCHEDULE = 3,
+	QOS_QOS_MAP_CONFIG = 4,
+};
 
 /* IEEE Std 802.11-2012, 8.4.2.62 20/40 BSS Coexistence element */
 #define WLAN_20_40_BSS_COEX_INFO_REQ            BIT(0)
@@ -1081,5 +1185,9 @@ enum wnm_sleep_mode_subelement_id {
 	WNM_SLEEP_SUBELEM_GTK = 0,
 	WNM_SLEEP_SUBELEM_IGTK = 1
 };
+
+/* Channel Switch modes (802.11h) */
+#define CHAN_SWITCH_MODE_ALLOW_TX	0
+#define CHAN_SWITCH_MODE_BLOCK_TX	1
 
 #endif /* IEEE802_11_DEFS_H */

@@ -16,16 +16,6 @@
 #include "wps_dev_attr.h"
 
 
-static int wps_build_mac_addr(struct wps_data *wps, struct wpabuf *msg)
-{
-	wpa_printf(MSG_DEBUG, "WPS:  * MAC Address");
-	wpabuf_put_be16(msg, ATTR_MAC_ADDR);
-	wpabuf_put_be16(msg, ETH_ALEN);
-	wpabuf_put_data(msg, wps->mac_addr_e, ETH_ALEN);
-	return 0;
-}
-
-
 static int wps_build_wps_state(struct wps_data *wps, struct wpabuf *msg)
 {
 	u8 state;
@@ -149,7 +139,7 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 	if (wps_build_version(msg) ||
 	    wps_build_msg_type(msg, WPS_M1) ||
 	    wps_build_uuid_e(msg, wps->uuid_e) ||
-	    wps_build_mac_addr(wps, msg) ||
+	    wps_build_mac_addr(msg, wps->mac_addr_e) ||
 	    wps_build_enrollee_nonce(wps, msg) ||
 	    wps_build_public_key(wps, msg) ||
 	    wps_build_auth_type_flags(wps, msg) ||
@@ -158,7 +148,8 @@ static struct wpabuf * wps_build_m1(struct wps_data *wps)
 	    wps_build_config_methods(msg, config_methods) ||
 	    wps_build_wps_state(wps, msg) ||
 	    wps_build_device_attrs(&wps->wps->dev, msg) ||
-	    wps_build_rf_bands(&wps->wps->dev, msg) ||
+	    wps_build_rf_bands(&wps->wps->dev, msg,
+			       wps->wps->rf_band_cb(wps->wps->cb_ctx)) ||
 	    wps_build_assoc_state(wps, msg) ||
 	    wps_build_dev_password_id(msg, wps->dev_pw_id) ||
 	    wps_build_config_error(msg, WPS_CFG_NO_ERROR) ||
@@ -402,7 +393,7 @@ static struct wpabuf * wps_build_wsc_done(struct wps_data *wps)
 	if (wps->wps->ap)
 		wps->state = RECV_ACK;
 	else {
-		wps_success_event(wps->wps);
+		wps_success_event(wps->wps, wps->peer_dev.mac_addr);
 		wps->state = WPS_FINISHED;
 	}
 	return msg;
@@ -523,6 +514,24 @@ static int wps_process_pubkey(struct wps_data *wps, const u8 *pk,
 		return -1;
 	}
 
+	if (wps->peer_pubkey_hash_set) {
+		u8 hash[WPS_HASH_LEN];
+		sha256_vector(1, &pk, &pk_len, hash);
+		if (os_memcmp(hash, wps->peer_pubkey_hash,
+			      WPS_OOB_PUBKEY_HASH_LEN) != 0) {
+			wpa_printf(MSG_ERROR, "WPS: Public Key hash mismatch");
+			wpa_hexdump(MSG_DEBUG, "WPS: Received public key",
+				    pk, pk_len);
+			wpa_hexdump(MSG_DEBUG, "WPS: Calculated public key "
+				    "hash", hash, WPS_OOB_PUBKEY_HASH_LEN);
+			wpa_hexdump(MSG_DEBUG, "WPS: Expected public key hash",
+				    wps->peer_pubkey_hash,
+				    WPS_OOB_PUBKEY_HASH_LEN);
+			wps->config_error = WPS_CFG_PUBLIC_KEY_HASH_MISMATCH;
+			return -1;
+		}
+	}
+
 	wpabuf_free(wps->dh_pubkey_r);
 	wps->dh_pubkey_r = wpabuf_alloc_copy(pk, pk_len);
 	if (wps->dh_pubkey_r == NULL)
@@ -592,7 +601,7 @@ static int wps_process_r_snonce1(struct wps_data *wps, const u8 *r_snonce1)
 		wpa_printf(MSG_DEBUG, "WPS: R-Hash1 derived from R-S1 does "
 			   "not match with the pre-committed value");
 		wps->config_error = WPS_CFG_DEV_PASSWORD_AUTH_FAILURE;
-		wps_pwd_auth_fail_event(wps->wps, 1, 1);
+		wps_pwd_auth_fail_event(wps->wps, 1, 1, wps->peer_dev.mac_addr);
 		return -1;
 	}
 
@@ -632,7 +641,7 @@ static int wps_process_r_snonce2(struct wps_data *wps, const u8 *r_snonce2)
 		wpa_printf(MSG_DEBUG, "WPS: R-Hash2 derived from R-S2 does "
 			   "not match with the pre-committed value");
 		wps->config_error = WPS_CFG_DEV_PASSWORD_AUTH_FAILURE;
-		wps_pwd_auth_fail_event(wps->wps, 1, 2);
+		wps_pwd_auth_fail_event(wps->wps, 1, 2, wps->peer_dev.mac_addr);
 		return -1;
 	}
 
@@ -837,6 +846,63 @@ static int wps_process_ap_settings_e(struct wps_data *wps,
 }
 
 
+static int wps_process_dev_pw_id(struct wps_data *wps, const u8 *dev_pw_id)
+{
+	u16 id;
+
+	if (dev_pw_id == NULL) {
+		wpa_printf(MSG_DEBUG, "WPS: Device Password ID");
+		return -1;
+	}
+
+	id = WPA_GET_BE16(dev_pw_id);
+	if (wps->dev_pw_id == id) {
+		wpa_printf(MSG_DEBUG, "WPS: Device Password ID %u", id);
+		return 0;
+	}
+
+#ifdef CONFIG_P2P
+	if ((id == DEV_PW_DEFAULT &&
+	     wps->dev_pw_id == DEV_PW_REGISTRAR_SPECIFIED) ||
+	    (id == DEV_PW_REGISTRAR_SPECIFIED &&
+	     wps->dev_pw_id == DEV_PW_DEFAULT)) {
+		/*
+		 * Common P2P use cases indicate whether the PIN is from the
+		 * client or GO using Device Password Id in M1/M2 in a way that
+		 * does not look fully compliant with WSC specification. Anyway,
+		 * this is deployed and needs to be allowed, so ignore changes
+		 * between Registrar-Specified and Default PIN.
+		 */
+		wpa_printf(MSG_DEBUG, "WPS: Allow PIN Device Password ID "
+			   "change");
+		return 0;
+	}
+#endif /* CONFIG_P2P */
+
+	wpa_printf(MSG_DEBUG, "WPS: Registrar trying to change Device Password "
+		   "ID from %u to %u", wps->dev_pw_id, id);
+
+	if (wps->dev_pw_id == DEV_PW_PUSHBUTTON && id == DEV_PW_DEFAULT) {
+		wpa_printf(MSG_DEBUG,
+			   "WPS: Workaround - ignore PBC-to-PIN change");
+		return 0;
+	}
+
+	if (wps->alt_dev_password && wps->alt_dev_pw_id == id) {
+		wpa_printf(MSG_DEBUG, "WPS: Found a matching Device Password");
+		os_free(wps->dev_password);
+		wps->dev_pw_id = wps->alt_dev_pw_id;
+		wps->dev_password = wps->alt_dev_password;
+		wps->dev_password_len = wps->alt_dev_password_len;
+		wps->alt_dev_password = NULL;
+		wps->alt_dev_password_len = 0;
+		return 0;
+	}
+
+	return -1;
+}
+
+
 static enum wps_process_res wps_process_m2(struct wps_data *wps,
 					   const struct wpabuf *msg,
 					   struct wps_parse_attr *attr)
@@ -852,7 +918,8 @@ static enum wps_process_res wps_process_m2(struct wps_data *wps,
 
 	if (wps_process_registrar_nonce(wps, attr->registrar_nonce) ||
 	    wps_process_enrollee_nonce(wps, attr->enrollee_nonce) ||
-	    wps_process_uuid_r(wps, attr->uuid_r)) {
+	    wps_process_uuid_r(wps, attr->uuid_r) ||
+	    wps_process_dev_pw_id(wps, attr->dev_password_id)) {
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
@@ -879,6 +946,38 @@ static enum wps_process_res wps_process_m2(struct wps_data *wps,
 		wps->state = SEND_WSC_NACK;
 		return WPS_CONTINUE;
 	}
+
+#ifdef CONFIG_WPS_NFC
+	if (wps->peer_pubkey_hash_set) {
+		struct wpabuf *decrypted;
+		struct wps_parse_attr eattr;
+
+		decrypted = wps_decrypt_encr_settings(wps, attr->encr_settings,
+						      attr->encr_settings_len);
+		if (decrypted == NULL) {
+			wpa_printf(MSG_DEBUG, "WPS: Failed to decrypt "
+				   "Encrypted Settings attribute");
+			wps->state = SEND_WSC_NACK;
+			return WPS_CONTINUE;
+		}
+
+		wpa_printf(MSG_DEBUG, "WPS: Processing decrypted Encrypted "
+			   "Settings attribute");
+		if (wps_parse_msg(decrypted, &eattr) < 0 ||
+		    wps_process_key_wrap_auth(wps, decrypted,
+					      eattr.key_wrap_auth) ||
+		    wps_process_creds(wps, eattr.cred, eattr.cred_len,
+				      eattr.num_cred, attr->version2 != NULL)) {
+			wpabuf_free(decrypted);
+			wps->state = SEND_WSC_NACK;
+			return WPS_CONTINUE;
+		}
+		wpabuf_free(decrypted);
+
+		wps->state = WPS_MSG_DONE;
+		return WPS_CONTINUE;
+	}
+#endif /* CONFIG_WPS_NFC */
 
 	wps->state = SEND_M3;
 	return WPS_CONTINUE;
@@ -1162,7 +1261,8 @@ static enum wps_process_res wps_process_wsc_msg(struct wps_data *wps,
 		ret = wps_process_m4(wps, msg, &attr);
 		if (ret == WPS_FAILURE || wps->state == SEND_WSC_NACK)
 			wps_fail_event(wps->wps, WPS_M4, wps->config_error,
-				       wps->error_indication);
+				       wps->error_indication,
+				       wps->peer_dev.mac_addr);
 		break;
 	case WPS_M6:
 		if (wps_validate_m6(msg) < 0)
@@ -1170,7 +1270,8 @@ static enum wps_process_res wps_process_wsc_msg(struct wps_data *wps,
 		ret = wps_process_m6(wps, msg, &attr);
 		if (ret == WPS_FAILURE || wps->state == SEND_WSC_NACK)
 			wps_fail_event(wps->wps, WPS_M6, wps->config_error,
-				       wps->error_indication);
+				       wps->error_indication,
+				       wps->peer_dev.mac_addr);
 		break;
 	case WPS_M8:
 		if (wps_validate_m8(msg) < 0)
@@ -1178,7 +1279,8 @@ static enum wps_process_res wps_process_wsc_msg(struct wps_data *wps,
 		ret = wps_process_m8(wps, msg, &attr);
 		if (ret == WPS_FAILURE || wps->state == SEND_WSC_NACK)
 			wps_fail_event(wps->wps, WPS_M8, wps->config_error,
-				       wps->error_indication);
+				       wps->error_indication,
+				       wps->peer_dev.mac_addr);
 		break;
 	default:
 		wpa_printf(MSG_DEBUG, "WPS: Unsupported Message Type %d",
@@ -1241,7 +1343,7 @@ static enum wps_process_res wps_process_wsc_ack(struct wps_data *wps,
 	if (wps->state == RECV_ACK && wps->wps->ap) {
 		wpa_printf(MSG_DEBUG, "WPS: External Registrar registration "
 			   "completed successfully");
-		wps_success_event(wps->wps);
+		wps_success_event(wps->wps, wps->peer_dev.mac_addr);
 		wps->state = WPS_FINISHED;
 		return WPS_DONE;
 	}
@@ -1306,15 +1408,15 @@ static enum wps_process_res wps_process_wsc_nack(struct wps_data *wps,
 	switch (wps->state) {
 	case RECV_M4:
 		wps_fail_event(wps->wps, WPS_M3, config_error,
-			       wps->error_indication);
+			       wps->error_indication, wps->peer_dev.mac_addr);
 		break;
 	case RECV_M6:
 		wps_fail_event(wps->wps, WPS_M5, config_error,
-			       wps->error_indication);
+			       wps->error_indication, wps->peer_dev.mac_addr);
 		break;
 	case RECV_M8:
 		wps_fail_event(wps->wps, WPS_M7, config_error,
-			       wps->error_indication);
+			       wps->error_indication, wps->peer_dev.mac_addr);
 		break;
 	default:
 		break;

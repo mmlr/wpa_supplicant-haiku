@@ -869,6 +869,76 @@ nomem:
 }
 
 
+/**
+ * wpas_dbus_signal_sta - Send a station related event signal
+ * @wpa_s: %wpa_supplicant network interface data
+ * @sta: station mac address
+ * @sig_name: signal name - StaAuthorized or StaDeauthorized
+ *
+ * Notify listeners about event related with station
+ */
+static void wpas_dbus_signal_sta(struct wpa_supplicant *wpa_s,
+				 const u8 *sta, const char *sig_name)
+{
+	struct wpas_dbus_priv *iface;
+	DBusMessage *msg;
+	char sta_mac[WPAS_DBUS_OBJECT_PATH_MAX];
+	char *dev_mac;
+
+	os_snprintf(sta_mac, WPAS_DBUS_OBJECT_PATH_MAX, MACSTR, MAC2STR(sta));
+	dev_mac = sta_mac;
+
+	iface = wpa_s->global->dbus;
+
+	/* Do nothing if the control interface is not turned on */
+	if (iface == NULL)
+		return;
+
+	msg = dbus_message_new_signal(wpa_s->dbus_new_path,
+				      WPAS_DBUS_NEW_IFACE_INTERFACE, sig_name);
+	if (msg == NULL)
+		return;
+
+	if (dbus_message_append_args(msg, DBUS_TYPE_STRING, &dev_mac,
+				     DBUS_TYPE_INVALID))
+		dbus_connection_send(iface->con, msg, NULL);
+	else
+		wpa_printf(MSG_ERROR, "dbus: Failed to construct signal");
+	dbus_message_unref(msg);
+
+	wpa_printf(MSG_DEBUG, "dbus: Station MAC address '%s' '%s'",
+		   sta_mac, sig_name);
+}
+
+
+/**
+ * wpas_dbus_signal_sta_authorized - Send a STA authorized signal
+ * @wpa_s: %wpa_supplicant network interface data
+ * @sta: station mac address
+ *
+ * Notify listeners a new station has been authorized
+ */
+void wpas_dbus_signal_sta_authorized(struct wpa_supplicant *wpa_s,
+				     const u8 *sta)
+{
+	wpas_dbus_signal_sta(wpa_s, sta, "StaAuthorized");
+}
+
+
+/**
+ * wpas_dbus_signal_sta_deauthorized - Send a STA deauthorized signal
+ * @wpa_s: %wpa_supplicant network interface data
+ * @sta: station mac address
+ *
+ * Notify listeners a station has been deauthorized
+ */
+void wpas_dbus_signal_sta_deauthorized(struct wpa_supplicant *wpa_s,
+				       const u8 *sta)
+{
+	wpas_dbus_signal_sta(wpa_s, sta, "StaDeauthorized");
+}
+
+
 #ifdef CONFIG_P2P
 
 /**
@@ -1292,7 +1362,7 @@ void wpas_dbus_signal_p2p_invitation_result(struct wpa_supplicant *wpa_s,
 	DBusMessageIter iter, dict_iter;
 	struct wpas_dbus_priv *iface;
 
-	wpa_printf(MSG_INFO, "%s\n", __func__);
+	wpa_printf(MSG_DEBUG, "%s", __func__);
 
 	iface = wpa_s->global->dbus;
 	/* Do nothing if the control interface is not turned on */
@@ -1808,6 +1878,9 @@ void wpas_dbus_bss_signal_prop_changed(struct wpa_supplicant *wpa_s,
 	case WPAS_DBUS_BSS_PROP_RSN:
 		prop = "RSN";
 		break;
+	case WPAS_DBUS_BSS_PROP_WPS:
+		prop = "WPS";
+		break;
 	case WPAS_DBUS_BSS_PROP_IES:
 		prop = "IEs";
 		break;
@@ -1917,15 +1990,6 @@ static const struct wpa_dbus_method_desc wpas_dbus_global_methods[] = {
 		  END_ARGS
 	  }
 	},
-#ifdef CONFIG_AUTOSCAN
-	{ "AutoScan", WPAS_DBUS_NEW_IFACE_INTERFACE,
-	  (WPADBusMethodHandler) &wpas_dbus_handler_autoscan,
-	  {
-		  { "arg", "s", ARG_IN },
-		  END_ARGS
-	  }
-	},
-#endif /* CONFIG_AUTOSCAN */
 	{ NULL, NULL, NULL, { END_ARGS } }
 };
 
@@ -2427,6 +2491,7 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 		  END_ARGS
 	  }
 	},
+#ifndef CONFIG_NO_CONFIG_BLOBS
 	{ "AddBlob", WPAS_DBUS_NEW_IFACE_INTERFACE,
 	  (WPADBusMethodHandler) &wpas_dbus_handler_add_blob,
 	  {
@@ -2447,6 +2512,16 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 	  (WPADBusMethodHandler) &wpas_dbus_handler_remove_blob,
 	  {
 		  { "name", "s", ARG_IN },
+		  END_ARGS
+	  }
+	},
+#endif /* CONFIG_NO_CONFIG_BLOBS */
+	{ "SetPKCS11EngineAndModulePath", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler)
+	  &wpas_dbus_handler_set_pkcs11_engine_and_module_path,
+	  {
+		  { "pkcs11_engine_path", "s", ARG_IN },
+		  { "pkcs11_module_path", "s", ARG_IN },
 		  END_ARGS
 	  }
 	},
@@ -2649,6 +2724,58 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 	  }
 	},
 #endif /* CONFIG_AP */
+	{ "EAPLogoff", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) &wpas_dbus_handler_eap_logoff,
+	  {
+		  END_ARGS
+	  }
+	},
+	{ "EAPLogon", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) &wpas_dbus_handler_eap_logon,
+	  {
+		  END_ARGS
+	  }
+	},
+#ifdef CONFIG_AUTOSCAN
+	{ "AutoScan", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) &wpas_dbus_handler_autoscan,
+	  {
+		  { "arg", "s", ARG_IN },
+		  END_ARGS
+	  }
+	},
+#endif /* CONFIG_AUTOSCAN */
+#ifdef CONFIG_TDLS
+	{ "TDLSDiscover", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) wpas_dbus_handler_tdls_discover,
+	  {
+		  { "peer_address", "s", ARG_IN },
+		  END_ARGS
+	  }
+	},
+	{ "TDLSSetup", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) wpas_dbus_handler_tdls_setup,
+	  {
+		  { "peer_address", "s", ARG_IN },
+		  END_ARGS
+	  }
+	},
+	{ "TDLSStatus", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) wpas_dbus_handler_tdls_status,
+	  {
+		  { "peer_address", "s", ARG_IN },
+		  { "status", "s", ARG_OUT },
+		  END_ARGS
+	  }
+	},
+	{ "TDLSTeardown", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) wpas_dbus_handler_tdls_teardown,
+	  {
+		  { "peer_address", "s", ARG_IN },
+		  END_ARGS
+	  }
+	},
+#endif /* CONFIG_TDLS */
 	{ NULL, NULL, NULL, { END_ARGS } }
 };
 
@@ -2724,6 +2851,14 @@ static const struct wpa_dbus_property_desc wpas_dbus_interface_properties[] = {
 	{ "ScanInterval", WPAS_DBUS_NEW_IFACE_INTERFACE, "i",
 	  wpas_dbus_getter_scan_interval,
 	  wpas_dbus_setter_scan_interval
+	},
+	{ "PKCS11EnginePath", WPAS_DBUS_NEW_IFACE_INTERFACE, "s",
+	  wpas_dbus_getter_pkcs11_engine_path,
+	  NULL
+	},
+	{ "PKCS11ModulePath", WPAS_DBUS_NEW_IFACE_INTERFACE, "s",
+	  wpas_dbus_getter_pkcs11_module_path,
+	  NULL
 	},
 #ifdef CONFIG_WPS
 	{ "ProcessCredentials", WPAS_DBUS_NEW_IFACE_WPS, "b",
@@ -2997,6 +3132,18 @@ static const struct wpa_dbus_signal_desc wpas_dbus_interface_signals[] = {
 	  {
 		  { "status", "s", ARG_OUT },
 		  { "parameter", "s", ARG_OUT },
+		  END_ARGS
+	  }
+	},
+	{ "StaAuthorized", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  {
+		  { "name", "s", ARG_OUT },
+		  END_ARGS
+	  }
+	},
+	{ "StaDeauthorized", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  {
+		  { "name", "s", ARG_OUT },
 		  END_ARGS
 	  }
 	},

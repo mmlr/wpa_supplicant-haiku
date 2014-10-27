@@ -107,7 +107,6 @@ static int wpa_gen_wpa_ie_rsn(u8 *rsn_ie, size_t rsn_ie_len,
 			      int key_mgmt, int mgmt_group_cipher,
 			      struct wpa_sm *sm)
 {
-#ifndef CONFIG_NO_WPA2
 	u8 *pos;
 	struct rsn_ie_hdr *hdr;
 	u16 capab;
@@ -220,9 +219,6 @@ static int wpa_gen_wpa_ie_rsn(u8 *rsn_ie, size_t rsn_ie_len,
 	WPA_ASSERT((size_t) (pos - rsn_ie) <= rsn_ie_len);
 
 	return pos - rsn_ie;
-#else /* CONFIG_NO_WPA2 */
-	return -1;
-#endif /* CONFIG_NO_WPA2 */
 }
 
 
@@ -349,6 +345,25 @@ static int wpa_parse_generic(const u8 *pos, const u8 *end,
 	}
 #endif /* CONFIG_IEEE80211W */
 
+#ifdef CONFIG_P2P
+	if (pos[1] >= RSN_SELECTOR_LEN + 1 &&
+	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_IP_ADDR_REQ) {
+		ie->ip_addr_req = pos + 2 + RSN_SELECTOR_LEN;
+		wpa_hexdump(MSG_DEBUG, "WPA: IP Address Request in EAPOL-Key",
+			    ie->ip_addr_req, pos[1] - RSN_SELECTOR_LEN);
+		return 0;
+	}
+
+	if (pos[1] >= RSN_SELECTOR_LEN + 3 * 4 &&
+	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_IP_ADDR_ALLOC) {
+		ie->ip_addr_alloc = pos + 2 + RSN_SELECTOR_LEN;
+		wpa_hexdump(MSG_DEBUG,
+			    "WPA: IP Address Allocation in EAPOL-Key",
+			    ie->ip_addr_alloc, pos[1] - RSN_SELECTOR_LEN);
+		return 0;
+	}
+#endif /* CONFIG_P2P */
+
 	return 0;
 }
 
@@ -427,6 +442,23 @@ int wpa_supplicant_parse_ies(const u8 *buf, size_t len,
 		} else if (*pos == WLAN_EID_EXT_SUPP_RATES) {
 			ie->ext_supp_rates = pos;
 			ie->ext_supp_rates_len = pos[1] + 2;
+		} else if (*pos == WLAN_EID_HT_CAP) {
+			ie->ht_capabilities = pos + 2;
+			ie->ht_capabilities_len = pos[1];
+		} else if (*pos == WLAN_EID_VHT_AID) {
+			if (pos[1] >= 2)
+				ie->aid = WPA_GET_LE16(pos + 2);
+		} else if (*pos == WLAN_EID_VHT_CAP) {
+			ie->vht_capabilities = pos + 2;
+			ie->vht_capabilities_len = pos[1];
+		} else if (*pos == WLAN_EID_QOS && pos[1] >= 1) {
+			ie->qosinfo = pos[2];
+		} else if (*pos == WLAN_EID_SUPPORTED_CHANNELS) {
+			ie->supp_channels = pos + 2;
+			ie->supp_channels_len = pos[1];
+		} else if (*pos == WLAN_EID_SUPPORTED_OPERATING_CLASSES) {
+			ie->supp_oper_classes = pos + 2;
+			ie->supp_oper_classes_len = pos[1];
 		} else if (*pos == WLAN_EID_VENDOR_SPECIFIC) {
 			ret = wpa_parse_generic(pos, end, ie);
 			if (ret < 0)

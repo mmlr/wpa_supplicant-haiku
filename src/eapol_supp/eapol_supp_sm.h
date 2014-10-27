@@ -53,10 +53,21 @@ struct eapol_config {
 	 * eap_disabled - Whether EAP is disabled
 	 */
 	int eap_disabled;
+
+	/**
+	 * external_sim - Use external processing for SIM/USIM operations
+	 */
+	int external_sim;
 };
 
 struct eapol_sm;
 struct wpa_config_blob;
+
+enum eapol_supp_result {
+	EAPOL_SUPP_RESULT_FAILURE,
+	EAPOL_SUPP_RESULT_SUCCESS,
+	EAPOL_SUPP_RESULT_EXPECTED_FAILURE
+};
 
 /**
  * struct eapol_ctx - Global (for all networks) EAPOL state machine context
@@ -78,7 +89,7 @@ struct eapol_ctx {
 	/**
 	 * cb - Function to be called when EAPOL negotiation has been completed
 	 * @eapol: Pointer to EAPOL state machine data
-	 * @success: Whether the authentication was completed successfully
+	 * @result: Whether the authentication was completed successfully
 	 * @ctx: Pointer to context data (cb_ctx)
 	 *
 	 * This optional callback function will be called when the EAPOL
@@ -86,7 +97,8 @@ struct eapol_ctx {
 	 * EAPOL state machine to process the key and terminate the EAPOL state
 	 * machine. Currently, this is used only in RSN pre-authentication.
 	 */
-	void (*cb)(struct eapol_sm *eapol, int success, void *ctx);
+	void (*cb)(struct eapol_sm *eapol, enum eapol_supp_result result,
+		   void *ctx);
 
 	/**
 	 * cb_ctx - Callback context for cb()
@@ -287,6 +299,7 @@ const char * eapol_sm_get_method_name(struct eapol_sm *sm);
 void eapol_sm_set_ext_pw_ctx(struct eapol_sm *sm,
 			     struct ext_password_data *ext);
 int eapol_sm_failed(struct eapol_sm *sm);
+int eapol_sm_get_eap_proxy_imsi(struct eapol_sm *sm, char *imsi, size_t *len);
 #else /* IEEE8021X_EAPOL */
 static inline struct eapol_sm *eapol_sm_init(struct eapol_ctx *ctx)
 {

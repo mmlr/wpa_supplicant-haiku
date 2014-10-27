@@ -3,21 +3,14 @@
  * Copyright (c) 2002-2009, Jouni Malinen <j@w1.fi>
  * Copyright (c) 2007-2008, Intel Corporation
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * Alternatively, this software may be distributed under the terms of BSD
- * license.
- *
- * See README and COPYING for more details.
+ * This software may be distributed under the terms of the BSD license.
+ * See README for more details.
  */
 
 #include "utils/includes.h"
 
 #include "utils/common.h"
 #include "common/ieee802_11_defs.h"
-#include "drivers/driver.h"
 #include "hostapd.h"
 #include "ap_config.h"
 #include "sta_info.h"
@@ -49,6 +42,22 @@ u8 * hostapd_eid_ht_capabilities(struct hostapd_data *hapd, u8 *eid)
 	/* TODO: asel_capabilities (now fully disabled) */
 
  	pos += sizeof(*cap);
+
+	if (hapd->iconf->obss_interval) {
+		struct ieee80211_obss_scan_parameters *scan_params;
+
+		*pos++ = WLAN_EID_OVERLAPPING_BSS_SCAN_PARAMS;
+		*pos++ = sizeof(*scan_params);
+
+		scan_params = (struct ieee80211_obss_scan_parameters *) pos;
+		os_memset(scan_params, 0, sizeof(*scan_params));
+		scan_params->width_trigger_scan_interval =
+			host_to_le16(hapd->iconf->obss_interval);
+
+		/* TODO: Fill in more parameters (supplicant ignores them) */
+
+		pos += sizeof(*scan_params);
+	}
 
 	return pos;
 }
@@ -133,8 +142,7 @@ int hostapd_ht_operation_update(struct hostapd_iface *iface)
 	new_op_mode = 0;
 	if (iface->num_sta_no_ht)
 		new_op_mode = OP_MODE_MIXED;
-	else if ((iface->conf->ht_capab & HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET)
-		 && iface->num_sta_ht_20mhz)
+	else if (iface->conf->secondary_channel && iface->num_sta_ht_20mhz)
 		new_op_mode = OP_MODE_20MHZ_HT_STA_ASSOCED;
 	else if (iface->olbc_ht)
 		new_op_mode = OP_MODE_MAY_BE_LEGACY_STAS;
