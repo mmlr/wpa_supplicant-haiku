@@ -26,6 +26,7 @@
 #include "bss.h"
 #include "scan.h"
 #include "notify.h"
+#include "wpas_kay.h"
 
 
 #ifndef CONFIG_NO_CONFIG_BLOBS
@@ -254,6 +255,8 @@ static void wpa_supplicant_eapol_cb(struct eapol_sm *eapol,
 		 * authentication failure.
 		 */
 		wpa_supplicant_req_auth_timeout(wpa_s, 2, 0);
+	} else {
+		ieee802_1x_notify_create_actor(wpa_s, wpa_s->last_eapol_src);
 	}
 
 	if (result != EAPOL_SUPP_RESULT_SUCCESS ||
@@ -558,12 +561,12 @@ static int wpa_supplicant_tdls_get_capa(void *ctx, int *tdls_supported,
 
 static int wpa_supplicant_send_tdls_mgmt(void *ctx, const u8 *dst,
 					 u8 action_code, u8 dialog_token,
-					 u16 status_code, const u8 *buf,
-					 size_t len)
+					 u16 status_code, u32 peer_capab,
+					 const u8 *buf, size_t len)
 {
 	struct wpa_supplicant *wpa_s = ctx;
 	return wpa_drv_send_tdls_mgmt(wpa_s, dst, action_code, dialog_token,
-				      status_code, buf, len);
+				      status_code, peer_capab, buf, len);
 }
 
 

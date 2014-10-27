@@ -709,9 +709,9 @@ void wpas_dbus_signal_wps_cred(struct wpa_supplicant *wpa_s,
 	DBusMessage *msg;
 	DBusMessageIter iter, dict_iter;
 	struct wpas_dbus_priv *iface;
-	char *auth_type[6]; /* we have six possible authorization types */
+	char *auth_type[5]; /* we have five possible authentication types */
 	int at_num = 0;
-	char *encr_type[4]; /* we have four possible encryption types */
+	char *encr_type[3]; /* we have three possible encryption types */
 	int et_num = 0;
 
 	iface = wpa_s->global->dbus;
@@ -734,20 +734,15 @@ void wpas_dbus_signal_wps_cred(struct wpa_supplicant *wpa_s,
 		auth_type[at_num++] = "open";
 	if (cred->auth_type & WPS_AUTH_WPAPSK)
 		auth_type[at_num++] = "wpa-psk";
-	if (cred->auth_type & WPS_AUTH_SHARED)
-		auth_type[at_num++] = "shared";
 	if (cred->auth_type & WPS_AUTH_WPA)
 		auth_type[at_num++] = "wpa-eap";
 	if (cred->auth_type & WPS_AUTH_WPA2)
 		auth_type[at_num++] = "wpa2-eap";
 	if (cred->auth_type & WPS_AUTH_WPA2PSK)
-		auth_type[at_num++] =
-		"wpa2-psk";
+		auth_type[at_num++] = "wpa2-psk";
 
 	if (cred->encr_type & WPS_ENCR_NONE)
 		encr_type[et_num++] = "none";
-	if (cred->encr_type & WPS_ENCR_WEP)
-		encr_type[et_num++] = "wep";
 	if (cred->encr_type & WPS_ENCR_TKIP)
 		encr_type[et_num++] = "tkip";
 	if (cred->encr_type & WPS_ENCR_AES)
@@ -1174,7 +1169,6 @@ void wpas_dbus_signal_p2p_group_started(struct wpa_supplicant *wpa_s,
 	DBusMessage *msg;
 	DBusMessageIter iter, dict_iter;
 	struct wpas_dbus_priv *iface;
-	char group_obj_path[WPAS_DBUS_OBJECT_PATH_MAX];
 
 	iface = wpa_s->parent->global->dbus;
 
@@ -1182,14 +1176,13 @@ void wpas_dbus_signal_p2p_group_started(struct wpa_supplicant *wpa_s,
 	if (iface == NULL)
 		return;
 
-	if (wpas_dbus_get_group_obj_path(wpa_s, ssid, group_obj_path) < 0)
+	if (wpa_s->dbus_groupobj_path == NULL)
 		return;
 
 	/* New interface has been created for this group */
 	msg = dbus_message_new_signal(wpa_s->parent->dbus_new_path,
 				      WPAS_DBUS_NEW_IFACE_P2PDEVICE,
 				      "GroupStarted");
-
 	if (msg == NULL)
 		return;
 
@@ -1212,7 +1205,7 @@ void wpas_dbus_signal_p2p_group_started(struct wpa_supplicant *wpa_s,
 		goto nomem;
 
 	if (!wpa_dbus_dict_append_object_path(&dict_iter, "group_object",
-					     group_obj_path) ||
+					      wpa_s->dbus_groupobj_path) ||
 	   !wpa_dbus_dict_close_write(&iter, &dict_iter))
 		goto nomem;
 
@@ -1225,7 +1218,7 @@ nomem:
 
 /**
  *
- * Method to emit GONeogtiation Success or Failure signals based
+ * Method to emit GONegotiation Success or Failure signals based
  * on status.
  * @status: Status of the GO neg request. 0 for success, other for errors.
  */
@@ -2462,6 +2455,12 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 		  END_ARGS
 	  }
 	},
+	{ "Reattach", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) &wpas_dbus_handler_reattach,
+	  {
+		  END_ARGS
+	  }
+	},
 	{ "RemoveNetwork", WPAS_DBUS_NEW_IFACE_INTERFACE,
 	  (WPADBusMethodHandler) &wpas_dbus_handler_remove_network,
 	  {
@@ -2643,6 +2642,7 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 	  (WPADBusMethodHandler)wpas_dbus_handler_p2p_service_sd_req,
 	  {
 		  { "args", "a{sv}", ARG_IN },
+		  { "ref", "t", ARG_OUT },
 		  END_ARGS
 	  }
 	},
@@ -2663,13 +2663,6 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 	{ "ServiceUpdate", WPAS_DBUS_NEW_IFACE_P2PDEVICE,
 	  (WPADBusMethodHandler)wpas_dbus_handler_p2p_service_update,
 	  {
-		  END_ARGS
-	  }
-	},
-	{ "ServiceDiscoveryExternal", WPAS_DBUS_NEW_IFACE_P2PDEVICE,
-	  (WPADBusMethodHandler)wpas_dbus_handler_p2p_serv_disc_external,
-	  {
-		  { "arg", "i", ARG_IN },
 		  END_ARGS
 	  }
 	},
@@ -2989,7 +2982,6 @@ static const struct wpa_dbus_signal_desc wpas_dbus_interface_signals[] = {
 	{ "DeviceFound", WPAS_DBUS_NEW_IFACE_P2PDEVICE,
 	  {
 		  { "path", "o", ARG_OUT },
-		  { "properties", "a{sv}", ARG_OUT },
 		  END_ARGS
 	  }
 	},
@@ -3052,12 +3044,13 @@ static const struct wpa_dbus_signal_desc wpas_dbus_interface_signals[] = {
 	},
 	{ "GONegotiationSuccess", WPAS_DBUS_NEW_IFACE_P2PDEVICE,
 	  {
+		  { "properties", "a{sv}", ARG_OUT },
 		  END_ARGS
 	  }
 	},
 	{ "GONegotiationFailure", WPAS_DBUS_NEW_IFACE_P2PDEVICE,
 	  {
-		  { "status", "i", ARG_OUT },
+		  { "properties", "a{sv}", ARG_OUT },
 		  END_ARGS
 	  }
 	},
@@ -3272,6 +3265,10 @@ static const struct wpa_dbus_property_desc wpas_dbus_p2p_peer_properties[] = {
 	},
 	{ "IEs", WPAS_DBUS_NEW_IFACE_P2P_PEER, "ay",
 	  wpas_dbus_getter_p2p_peer_ies,
+	  NULL
+	},
+	{ "DeviceAddress", WPAS_DBUS_NEW_IFACE_P2P_PEER, "ay",
+	  wpas_dbus_getter_p2p_peer_device_address,
 	  NULL
 	},
 	{ NULL, NULL, NULL, NULL, NULL }

@@ -52,6 +52,25 @@ static void wpas_wps_clear_ap_info(struct wpa_supplicant *wpa_s)
 }
 
 
+static void wpas_wps_assoc_with_cred(void *eloop_ctx, void *timeout_ctx)
+{
+	struct wpa_supplicant *wpa_s = eloop_ctx;
+	int use_fast_assoc = timeout_ctx != NULL;
+
+	wpa_printf(MSG_DEBUG, "WPS: Continuing association after eapol_cb");
+	if (!use_fast_assoc ||
+	    wpa_supplicant_fast_associate(wpa_s) != 1)
+		wpa_supplicant_req_scan(wpa_s, 0, 0);
+}
+
+
+static void wpas_wps_assoc_with_cred_cancel(struct wpa_supplicant *wpa_s)
+{
+	eloop_cancel_timeout(wpas_wps_assoc_with_cred, wpa_s, (void *) 0);
+	eloop_cancel_timeout(wpas_wps_assoc_with_cred, wpa_s, (void *) 1);
+}
+
+
 int wpas_wps_eapol_cb(struct wpa_supplicant *wpa_s)
 {
 #ifdef CONFIG_P2P
@@ -124,9 +143,18 @@ int wpas_wps_eapol_cb(struct wpa_supplicant *wpa_s)
 			wpabuf_free(wps);
 		}
 
-		if (!use_fast_assoc ||
-		    wpa_supplicant_fast_associate(wpa_s) != 1)
-			wpa_supplicant_req_scan(wpa_s, 0, 0);
+		/*
+		 * Complete the next step from an eloop timeout to allow pending
+		 * driver events related to the disconnection to be processed
+		 * first. This makes it less likely for disconnection event to
+		 * cause problems with the following connection.
+		 */
+		wpa_printf(MSG_DEBUG, "WPS: Continue association from timeout");
+		wpas_wps_assoc_with_cred_cancel(wpa_s);
+		eloop_register_timeout(0, 10000,
+				       wpas_wps_assoc_with_cred, wpa_s,
+				       use_fast_assoc ? (void *) 1 :
+				       (void *) 0);
 		return 1;
 	}
 
@@ -278,7 +306,6 @@ static int wpa_supplicant_wps_cred(void *ctx,
 {
 	struct wpa_supplicant *wpa_s = ctx;
 	struct wpa_ssid *ssid = wpa_s->current_ssid;
-	u8 key_idx = 0;
 	u16 auth_type;
 #ifdef CONFIG_WPS_REG_DISABLE_OPEN
 	int registrar = 0;
@@ -324,7 +351,6 @@ static int wpa_supplicant_wps_cred(void *ctx,
 	}
 
 	if (auth_type != WPS_AUTH_OPEN &&
-	    auth_type != WPS_AUTH_SHARED &&
 	    auth_type != WPS_AUTH_WPAPSK &&
 	    auth_type != WPS_AUTH_WPA2PSK) {
 		wpa_printf(MSG_DEBUG, "WPS: Ignored credentials for "
@@ -372,6 +398,17 @@ static int wpa_supplicant_wps_cred(void *ctx,
 		ssid = wpa_config_add_network(wpa_s->conf);
 		if (ssid == NULL)
 			return -1;
+		if (wpa_s->current_ssid) {
+			/*
+			 * Should the GO issue multiple credentials for some
+			 * reason, each credential should be marked as a
+			 * temporary P2P group similarly to the one that gets
+			 * marked as such based on the pre-configured values
+			 * used for the WPS network block.
+			 */
+			ssid->p2p_group = wpa_s->current_ssid->p2p_group;
+			ssid->temporary = wpa_s->current_ssid->temporary;
+		}
 		wpas_notify_network_added(wpa_s, ssid);
 	}
 
@@ -386,38 +423,6 @@ static int wpa_supplicant_wps_cred(void *ctx,
 
 	switch (cred->encr_type) {
 	case WPS_ENCR_NONE:
-		break;
-	case WPS_ENCR_WEP:
-		if (cred->key_len <= 0)
-			break;
-		if (cred->key_len != 5 && cred->key_len != 13 &&
-		    cred->key_len != 10 && cred->key_len != 26) {
-			wpa_printf(MSG_ERROR, "WPS: Invalid WEP Key length "
-				   "%lu", (unsigned long) cred->key_len);
-			return -1;
-		}
-		if (cred->key_idx > NUM_WEP_KEYS) {
-			wpa_printf(MSG_ERROR, "WPS: Invalid WEP Key index %d",
-				   cred->key_idx);
-			return -1;
-		}
-		if (cred->key_idx)
-			key_idx = cred->key_idx - 1;
-		if (cred->key_len == 10 || cred->key_len == 26) {
-			if (hexstr2bin((char *) cred->key,
-				       ssid->wep_key[key_idx],
-				       cred->key_len / 2) < 0) {
-				wpa_printf(MSG_ERROR, "WPS: Invalid WEP Key "
-					   "%d", key_idx);
-				return -1;
-			}
-			ssid->wep_key_len[key_idx] = cred->key_len / 2;
-		} else {
-			os_memcpy(ssid->wep_key[key_idx], cred->key,
-				  cred->key_len);
-			ssid->wep_key_len[key_idx] = cred->key_len;
-		}
-		ssid->wep_tx_keyidx = key_idx;
 		break;
 	case WPS_ENCR_TKIP:
 		ssid->pairwise_cipher = WPA_CIPHER_TKIP;
@@ -442,11 +447,6 @@ static int wpa_supplicant_wps_cred(void *ctx,
 			ssid->disabled = 1;
 		}
 #endif /* CONFIG_WPS_REG_DISABLE_OPEN */
-		break;
-	case WPS_AUTH_SHARED:
-		ssid->auth_alg = WPA_AUTH_ALG_SHARED;
-		ssid->key_mgmt = WPA_KEY_MGMT_NONE;
-		ssid->proto = 0;
 		break;
 	case WPS_AUTH_WPAPSK:
 		ssid->auth_alg = WPA_AUTH_ALG_OPEN;
@@ -489,9 +489,6 @@ static int wpa_supplicant_wps_cred(void *ctx,
 
 	wpas_wps_security_workaround(wpa_s, ssid, cred);
 
-	if (cred->ap_channel)
-		wpa_s->wps_ap_channel = cred->ap_channel;
-
 	wpas_wps_remove_dup_network(wpa_s, ssid);
 
 #ifndef CONFIG_NO_CONFIG_WRITE
@@ -513,15 +510,6 @@ static int wpa_supplicant_wps_cred(void *ctx,
 }
 
 
-#ifdef CONFIG_P2P
-static void wpas_wps_pbc_overlap_cb(void *eloop_ctx, void *timeout_ctx)
-{
-	struct wpa_supplicant *wpa_s = eloop_ctx;
-	wpas_p2p_notif_pbc_overlap(wpa_s);
-}
-#endif /* CONFIG_P2P */
-
-
 static void wpa_supplicant_wps_event_m2d(struct wpa_supplicant *wpa_s,
 					 struct wps_event_m2d *m2d)
 {
@@ -540,7 +528,7 @@ static void wpa_supplicant_wps_event_m2d(struct wpa_supplicant *wpa_s,
 		 * Notify P2P from eloop timeout to avoid issues with the
 		 * interface getting removed while processing a message.
 		 */
-		eloop_register_timeout(0, 0, wpas_wps_pbc_overlap_cb, wpa_s,
+		eloop_register_timeout(0, 0, wpas_p2p_pbc_overlap_cb, wpa_s,
 				       NULL);
 	}
 #endif /* CONFIG_P2P */
@@ -1304,7 +1292,6 @@ static void wpas_wps_set_sel_reg_cb(void *ctx, int sel_reg, u16 dev_passwd_id,
 
 static u16 wps_fix_config_methods(u16 config_methods)
 {
-#ifdef CONFIG_WPS2
 	if ((config_methods &
 	     (WPS_CONFIG_DISPLAY | WPS_CONFIG_VIRT_DISPLAY |
 	      WPS_CONFIG_PHY_DISPLAY)) == WPS_CONFIG_DISPLAY) {
@@ -1319,7 +1306,6 @@ static u16 wps_fix_config_methods(u16 config_methods)
 			   "virtual_push_button for WPS 2.0 compliance");
 		config_methods |= WPS_CONFIG_VIRT_PUSHBUTTON;
 	}
-#endif /* CONFIG_WPS2 */
 
 	return config_methods;
 }
@@ -1473,10 +1459,15 @@ static void wpas_wps_nfc_clear(struct wps_context *wps)
 
 void wpas_wps_deinit(struct wpa_supplicant *wpa_s)
 {
+	wpas_wps_assoc_with_cred_cancel(wpa_s);
 	eloop_cancel_timeout(wpas_wps_timeout, wpa_s, NULL);
 	eloop_cancel_timeout(wpas_wps_clear_timeout, wpa_s, NULL);
 	eloop_cancel_timeout(wpas_wps_reenable_networks_cb, wpa_s, NULL);
 	wpas_wps_clear_ap_info(wpa_s);
+
+#ifdef CONFIG_P2P
+	eloop_cancel_timeout(wpas_p2p_pbc_overlap_cb, wpa_s, NULL);
+#endif /* CONFIG_P2P */
 
 	if (wpa_s->wps == NULL)
 		return;
@@ -1934,8 +1925,10 @@ int wpas_wps_er_config(struct wpa_supplicant *wpa_s, const char *uuid,
 
 	if (os_strcmp(settings->encr, "NONE") == 0)
 		cred.encr_type = WPS_ENCR_NONE;
+#ifdef CONFIG_TESTING_OPTIONS
 	else if (os_strcmp(settings->encr, "WEP") == 0)
 		cred.encr_type = WPS_ENCR_WEP;
+#endif /* CONFIG_TESTING_OPTIONS */
 	else if (os_strcmp(settings->encr, "TKIP") == 0)
 		cred.encr_type = WPS_ENCR_TKIP;
 	else if (os_strcmp(settings->encr, "CCMP") == 0)
@@ -2197,8 +2190,6 @@ int wpas_wps_start_nfc(struct wpa_supplicant *wpa_s, const u8 *go_dev_addr,
 static int wpas_wps_use_cred(struct wpa_supplicant *wpa_s,
 			     struct wps_parse_attr *attr)
 {
-	wpa_s->wps_ap_channel = 0;
-
 	/*
 	 * Disable existing networks temporarily to allow the newly learned
 	 * credential to be preferred. Enable the temporarily disabled networks
@@ -2214,18 +2205,8 @@ static int wpas_wps_use_cred(struct wpa_supplicant *wpa_s,
 	if (wpa_s->wpa_state == WPA_INTERFACE_DISABLED)
 		return 0;
 
-	if (!wpa_s->wps_ap_channel && attr->ap_channel) {
-		wpa_s->wps_ap_channel = WPA_GET_BE16(attr->ap_channel);
-		wpa_printf(MSG_DEBUG, "WPS: Credential container indicated AP Channel %d",
-			   wpa_s->wps_ap_channel);
-	}
-
-	wpa_printf(MSG_DEBUG, "WPS: Request reconnection with new network "
-		   "based on the received credential added");
-	wpa_s->normal_scans = 0;
-	wpa_supplicant_reinit_autoscan(wpa_s);
-	if (wpa_s->wps_ap_channel) {
-		u16 chan = wpa_s->wps_ap_channel;
+	if (attr->ap_channel) {
+		u16 chan = WPA_GET_BE16(attr->ap_channel);
 		int freq = 0;
 
 		if (chan >= 1 && chan <= 13)
@@ -2236,12 +2217,17 @@ static int wpas_wps_use_cred(struct wpa_supplicant *wpa_s,
 			freq = 5000 + 5 * chan;
 
 		if (freq) {
-			wpa_printf(MSG_DEBUG, "WPS: Credential indicated "
-				   "AP channel %u -> %u MHz", chan, freq);
+			wpa_printf(MSG_DEBUG, "WPS: Credential container indicated AP channel %u -> %u MHz",
+				   chan, freq);
 			wpa_s->after_wps = 5;
 			wpa_s->wps_freq = freq;
 		}
 	}
+
+	wpa_printf(MSG_DEBUG, "WPS: Request reconnection with new network "
+		   "based on the received credential added");
+	wpa_s->normal_scans = 0;
+	wpa_supplicant_reinit_autoscan(wpa_s);
 	wpa_s->disconnected = 0;
 	wpa_s->reassociate = 1;
 
@@ -2420,16 +2406,8 @@ struct wpabuf * wpas_wps_nfc_handover_sel(struct wpa_supplicant *wpa_s,
 }
 
 
-int wpas_wps_nfc_rx_handover_req(struct wpa_supplicant *wpa_s,
-				 const struct wpabuf *data)
-{
-	/* TODO */
-	return -1;
-}
-
-
-int wpas_wps_nfc_rx_handover_sel(struct wpa_supplicant *wpa_s,
-				 const struct wpabuf *data)
+static int wpas_wps_nfc_rx_handover_sel(struct wpa_supplicant *wpa_s,
+					const struct wpabuf *data)
 {
 	struct wpabuf *wps;
 	int ret = -1;

@@ -24,22 +24,22 @@ L_CFLAGS += -DVERSION_STR_POSTFIX=\"-$(PLATFORM_VERSION)\"
 # Set Android log name
 L_CFLAGS += -DANDROID_LOG_NAME=\"wpa_supplicant\"
 
+# Disable unused parameter warnings
+L_CFLAGS += -Wno-unused-parameter
+
+# Set Android extended P2P functionality
+L_CFLAGS += -DANDROID_P2P
+ifeq ($(BOARD_WPA_SUPPLICANT_PRIVATE_LIB),)
+L_CFLAGS += -DANDROID_P2P_STUB
+endif
+
 # Disable roaming in wpa_supplicant
 ifdef CONFIG_NO_ROAMING
 L_CFLAGS += -DCONFIG_NO_ROAMING
 endif
 
 ifeq ($(BOARD_WLAN_DEVICE), bcmdhd)
-L_CFLAGS += -DANDROID_P2P
 L_CFLAGS += -DP2P_CONCURRENT_SEARCH_DELAY=0
-endif
-
-ifeq ($(BOARD_WLAN_DEVICE), qcwcn)
-L_CFLAGS += -DANDROID_P2P
-endif
-
-ifeq ($(BOARD_WLAN_DEVICE), mrvl)
-L_CFLAGS += -DANDROID_P2P
 endif
 
 # Use Android specific directory for control interface sockets
@@ -70,7 +70,11 @@ INCLUDES += $(LOCAL_PATH)/src/wps
 INCLUDES += external/openssl/include
 INCLUDES += system/security/keystore/include
 ifdef CONFIG_DRIVER_NL80211
+ifneq ($(wildcard external/libnl),)
+INCLUDES += external/libnl/include
+else
 INCLUDES += external/libnl-headers
+endif
 endif
 
 ifdef CONFIG_FIPS
@@ -134,6 +138,10 @@ OBJS_c += src/utils/$(CONFIG_ELOOP).c
 
 ifdef CONFIG_ELOOP_POLL
 L_CFLAGS += -DCONFIG_ELOOP_POLL
+endif
+
+ifdef CONFIG_ELOOP_EPOLL
+L_CFLAGS += -DCONFIG_ELOOP_EPOLL
 endif
 
 ifdef CONFIG_EAPOL_TEST
@@ -276,6 +284,7 @@ ifdef CONFIG_HS20
 OBJS += hs20_supplicant.c
 L_CFLAGS += -DCONFIG_HS20
 CONFIG_INTERWORKING=y
+NEED_AES_OMAC1=y
 endif
 
 ifdef CONFIG_INTERWORKING
@@ -612,10 +621,6 @@ NEED_SHA256=y
 endif
 
 ifdef CONFIG_WPS
-ifdef CONFIG_WPS2
-L_CFLAGS += -DCONFIG_WPS2
-endif
-
 # EAP-WSC
 L_CFLAGS += -DCONFIG_WPS -DEAP_WSC
 OBJS += wps_supplicant.c
@@ -957,7 +962,8 @@ endif
 OBJS += src/crypto/crypto_gnutls.c
 OBJS_p += src/crypto/crypto_gnutls.c
 ifdef NEED_FIPS186_2_PRF
-OBJS += src/crypto/fips_prf_gnutls.c
+OBJS += src/crypto/fips_prf_internal.c
+OBJS += src/crypto/sha1-internal.c
 endif
 LIBS += -lgcrypt
 LIBS_p += -lgcrypt
@@ -973,7 +979,8 @@ endif
 OBJS += src/crypto/crypto_cryptoapi.c
 OBJS_p += src/crypto/crypto_cryptoapi.c
 ifdef NEED_FIPS186_2_PRF
-OBJS += src/crypto/fips_prf_cryptoapi.c
+OBJS += src/crypto/fips_prf_internal.c
+OBJS += src/crypto/sha1-internal.c
 endif
 CONFIG_INTERNAL_SHA256=y
 CONFIG_INTERNAL_RC4=y
@@ -988,7 +995,8 @@ endif
 OBJS += src/crypto/crypto_nss.c
 OBJS_p += src/crypto/crypto_nss.c
 ifdef NEED_FIPS186_2_PRF
-OBJS += src/crypto/fips_prf_nss.c
+OBJS += src/crypto/fips_prf_internal.c
+OBJS += src/crypto/sha1-internal.c
 endif
 LIBS += -lnss3
 LIBS_p += -lnss3
@@ -1568,7 +1576,11 @@ ifeq ($(CONFIG_TLS), openssl)
 LOCAL_SHARED_LIBRARIES += libcrypto libssl libkeystore_binder
 endif
 ifdef CONFIG_DRIVER_NL80211
+ifneq ($(wildcard external/libnl),)
+LOCAL_SHARED_LIBRARIES += libnl
+else
 LOCAL_STATIC_LIBRARIES += libnl_2
+endif
 endif
 LOCAL_CFLAGS := $(L_CFLAGS)
 LOCAL_SRC_FILES := $(OBJS)
@@ -1609,4 +1621,5 @@ LOCAL_C_INCLUDES = $(INCLUDES)
 LOCAL_SHARED_LIBRARIES := libcutils liblog
 LOCAL_COPY_HEADERS_TO := libwpa_client
 LOCAL_COPY_HEADERS := src/common/wpa_ctrl.h
+LOCAL_COPY_HEADERS += src/common/qca-vendor.h
 include $(BUILD_SHARED_LIBRARY)

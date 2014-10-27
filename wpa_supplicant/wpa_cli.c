@@ -676,6 +676,12 @@ static int wpa_cli_cmd_reassociate(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int wpa_cli_cmd_reattach(struct wpa_ctrl *ctrl, int argc, char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "REATTACH");
+}
+
+
 static int wpa_cli_cmd_preauthenticate(struct wpa_ctrl *ctrl, int argc,
 				       char *argv[])
 {
@@ -833,58 +839,6 @@ static int wpa_cli_cmd_nfc_get_handover_sel(struct wpa_ctrl *ctrl, int argc,
 					    char *argv[])
 {
 	return wpa_cli_cmd(ctrl, "NFC_GET_HANDOVER_SEL", 2, argc, argv);
-}
-
-
-static int wpa_cli_cmd_nfc_rx_handover_req(struct wpa_ctrl *ctrl, int argc,
-					   char *argv[])
-{
-	int ret;
-	char *buf;
-	size_t buflen;
-
-	if (argc != 1) {
-		printf("Invalid 'nfc_rx_handover_req' command - one argument "
-		       "is required.\n");
-		return -1;
-	}
-
-	buflen = 21 + os_strlen(argv[0]);
-	buf = os_malloc(buflen);
-	if (buf == NULL)
-		return -1;
-	os_snprintf(buf, buflen, "NFC_RX_HANDOVER_REQ %s", argv[0]);
-
-	ret = wpa_ctrl_command(ctrl, buf);
-	os_free(buf);
-
-	return ret;
-}
-
-
-static int wpa_cli_cmd_nfc_rx_handover_sel(struct wpa_ctrl *ctrl, int argc,
-					   char *argv[])
-{
-	int ret;
-	char *buf;
-	size_t buflen;
-
-	if (argc != 1) {
-		printf("Invalid 'nfc_rx_handover_sel' command - one argument "
-		       "is required.\n");
-		return -1;
-	}
-
-	buflen = 21 + os_strlen(argv[0]);
-	buf = os_malloc(buflen);
-	if (buf == NULL)
-		return -1;
-	os_snprintf(buf, buflen, "NFC_RX_HANDOVER_SEL %s", argv[0]);
-
-	ret = wpa_ctrl_command(ctrl, buf);
-	os_free(buf);
-
-	return ret;
 }
 
 
@@ -1462,6 +1416,24 @@ static int wpa_cli_cmd_get_network(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int wpa_cli_cmd_dup_network(struct wpa_ctrl *ctrl, int argc,
+				   char *argv[])
+{
+	if (argc == 0) {
+		wpa_cli_show_network_variables();
+		return 0;
+	}
+
+	if (argc < 3) {
+		printf("Invalid DUP_NETWORK command: needs three arguments\n"
+		       "(src netid, dest netid, and variable name)\n");
+		return -1;
+	}
+
+	return wpa_cli_cmd(ctrl, "DUP_NETWORK", 3, argc, argv);
+}
+
+
 static int wpa_cli_cmd_list_creds(struct wpa_ctrl *ctrl, int argc,
 				  char *argv[])
 {
@@ -1491,6 +1463,18 @@ static int wpa_cli_cmd_set_cred(struct wpa_ctrl *ctrl, int argc, char *argv[])
 	}
 
 	return wpa_cli_cmd(ctrl, "SET_CRED", 3, argc, argv);
+}
+
+
+static int wpa_cli_cmd_get_cred(struct wpa_ctrl *ctrl, int argc, char *argv[])
+{
+	if (argc != 2) {
+		printf("Invalid GET_CRED command: needs two arguments\n"
+		       "(cred id, variable name)\n");
+		return -1;
+	}
+
+	return wpa_cli_cmd(ctrl, "GET_CRED", 2, argc, argv);
 }
 
 
@@ -1586,7 +1570,7 @@ static int wpa_cli_cmd_interface(struct wpa_ctrl *ctrl, int argc, char *argv[])
 	os_free(ctrl_ifname);
 	ctrl_ifname = os_strdup(argv[0]);
 
-	if (wpa_cli_open_connection(ctrl_ifname, 1)) {
+	if (wpa_cli_open_connection(ctrl_ifname, 1) == 0) {
 		printf("Connected to interface '%s.\n", ctrl_ifname);
 	} else {
 		printf("Could not connect to interface '%s' - re-trying\n",
@@ -1746,10 +1730,12 @@ static int wpa_cli_cmd_resume(struct wpa_ctrl *ctrl, int argc, char *argv[])
 }
 
 
+#ifdef CONFIG_TESTING_OPTIONS
 static int wpa_cli_cmd_drop_sa(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "DROP_SA");
 }
+#endif /* CONFIG_TESTING_OPTIONS */
 
 
 static int wpa_cli_cmd_roam(struct wpa_ctrl *ctrl, int argc, char *argv[])
@@ -2324,6 +2310,37 @@ static int wpa_cli_cmd_get_nai_home_realm_list(struct wpa_ctrl *ctrl, int argc,
 	return wpa_ctrl_command(ctrl, cmd);
 }
 
+
+static int wpa_cli_cmd_hs20_icon_request(struct wpa_ctrl *ctrl, int argc,
+					 char *argv[])
+{
+	char cmd[512];
+
+	if (argc < 2) {
+		printf("Command needs two arguments (dst mac addr and "
+		       "icon name)\n");
+		return -1;
+	}
+
+	if (write_cmd(cmd, sizeof(cmd), "HS20_ICON_REQUEST", argc, argv) < 0)
+		return -1;
+
+	return wpa_ctrl_command(ctrl, cmd);
+}
+
+
+static int wpa_cli_cmd_fetch_osu(struct wpa_ctrl *ctrl, int argc, char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "FETCH_OSU");
+}
+
+
+static int wpa_cli_cmd_cancel_fetch_osu(struct wpa_ctrl *ctrl, int argc,
+					char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "CANCEL_FETCH_OSU");
+}
+
 #endif /* CONFIG_HS20 */
 
 
@@ -2421,6 +2438,12 @@ static int wpa_cli_cmd_driver(struct wpa_ctrl *ctrl, int argc, char *argv[])
 #endif /* ANDROID */
 
 
+static int wpa_cli_cmd_vendor(struct wpa_ctrl *ctrl, int argc, char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "VENDOR", 1, argc, argv);
+}
+
+
 static int wpa_cli_cmd_flush(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "FLUSH");
@@ -2499,6 +2522,9 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "reassociate", wpa_cli_cmd_reassociate, NULL,
 	  cli_cmd_flag_none,
 	  "= force reassociation" },
+	{ "reattach", wpa_cli_cmd_reattach, NULL,
+	  cli_cmd_flag_none,
+	  "= force reassociation back to the same BSS" },
 	{ "preauthenticate", wpa_cli_cmd_preauthenticate, wpa_cli_complete_bss,
 	  cli_cmd_flag_none,
 	  "<BSSID> = force preauthentication" },
@@ -2562,6 +2588,10 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "get_network", wpa_cli_cmd_get_network, NULL,
 	  cli_cmd_flag_none,
 	  "<network id> <variable> = get network variables" },
+	{ "dup_network", wpa_cli_cmd_dup_network, NULL,
+	  cli_cmd_flag_none,
+	  "<src network id> <dst network id> <variable> = duplicate network variables"
+	},
 	{ "list_creds", wpa_cli_cmd_list_creds, NULL,
 	  cli_cmd_flag_none,
 	  "= list configured credentials" },
@@ -2574,6 +2604,9 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "set_cred", wpa_cli_cmd_set_cred, NULL,
 	  cli_cmd_flag_sensitive,
 	  "<cred id> <variable> <value> = set credential variables" },
+	{ "get_cred", wpa_cli_cmd_get_cred, NULL,
+	  cli_cmd_flag_none,
+	  "<cred id> <variable> = get credential variables" },
 	{ "save_config", wpa_cli_cmd_save_config, NULL,
 	  cli_cmd_flag_none,
 	  "= save the current configuration" },
@@ -2667,12 +2700,6 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "nfc_get_handover_sel", wpa_cli_cmd_nfc_get_handover_sel, NULL,
 	  cli_cmd_flag_none,
 	  "<NDEF> <WPS> = create NFC handover select" },
-	{ "nfc_rx_handover_req", wpa_cli_cmd_nfc_rx_handover_req, NULL,
-	  cli_cmd_flag_none,
-	  "<hexdump of payload> = report received NFC handover request" },
-	{ "nfc_rx_handover_sel", wpa_cli_cmd_nfc_rx_handover_sel, NULL,
-	  cli_cmd_flag_none,
-	  "<hexdump of payload> = report received NFC handover select" },
 	{ "nfc_report_handover", wpa_cli_cmd_nfc_report_handover, NULL,
 	  cli_cmd_flag_none,
 	  "<role> <type> <hexdump of req> <hexdump of sel> = report completed "
@@ -2736,8 +2763,10 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 	  "= notification of suspend/hibernate" },
 	{ "resume", wpa_cli_cmd_resume, NULL, cli_cmd_flag_none,
 	  "= notification of resume/thaw" },
+#ifdef CONFIG_TESTING_OPTIONS
 	{ "drop_sa", wpa_cli_cmd_drop_sa, NULL, cli_cmd_flag_none,
 	  "= drop SA without deauth/disassoc (test command)" },
+#endif /* CONFIG_TESTING_OPTIONS */
 	{ "roam", wpa_cli_cmd_roam, wpa_cli_complete_bss,
 	  cli_cmd_flag_none,
 	  "<addr> = roam to the specified BSS" },
@@ -2860,6 +2889,14 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "nai_home_realm_list", wpa_cli_cmd_get_nai_home_realm_list,
 	  wpa_cli_complete_bss, cli_cmd_flag_none,
 	  "<addr> <home realm> = get HS20 nai home realm list" },
+	{ "hs20_icon_request", wpa_cli_cmd_hs20_icon_request,
+	  wpa_cli_complete_bss, cli_cmd_flag_none,
+	  "<addr> <icon name> = get Hotspot 2.0 OSU icon" },
+	{ "fetch_osu", wpa_cli_cmd_fetch_osu, NULL, cli_cmd_flag_none,
+	  "= fetch OSU provider information from all APs" },
+	{ "cancel_fetch_osu", wpa_cli_cmd_cancel_fetch_osu, NULL,
+	  cli_cmd_flag_none,
+	  "= cancel fetch_osu command" },
 #endif /* CONFIG_HS20 */
 	{ "sta_autoconnect", wpa_cli_cmd_sta_autoconnect, NULL,
 	  cli_cmd_flag_none,
@@ -2902,6 +2939,9 @@ static struct wpa_cli_cmd wpa_cli_commands[] = {
 #endif /* ANDROID */
 	{ "radio_work", wpa_cli_cmd_radio_work, NULL, cli_cmd_flag_none,
 	  "= radio_work <show/add/done>" },
+	{ "vendor", wpa_cli_cmd_vendor, NULL, cli_cmd_flag_none,
+	  "<vendor id> <command id> [<hex formatted command argument>] = Send vendor command"
+	},
 	{ NULL, NULL, NULL, cli_cmd_flag_none, NULL }
 };
 
@@ -3209,6 +3249,10 @@ static void wpa_cli_action_process(const char *msg)
 	} else if (str_match(pos, AP_STA_DISCONNECTED)) {
 		wpa_cli_exec(action_file, ctrl_ifname, pos);
 	} else if (str_match(pos, ESS_DISASSOC_IMMINENT)) {
+		wpa_cli_exec(action_file, ctrl_ifname, pos);
+	} else if (str_match(pos, HS20_SUBSCRIPTION_REMEDIATION)) {
+		wpa_cli_exec(action_file, ctrl_ifname, pos);
+	} else if (str_match(pos, HS20_DEAUTH_IMMINENT_NOTICE)) {
 		wpa_cli_exec(action_file, ctrl_ifname, pos);
 	} else if (str_match(pos, WPA_EVENT_TERMINATING)) {
 		printf("wpa_supplicant is terminating - stop monitoring\n");

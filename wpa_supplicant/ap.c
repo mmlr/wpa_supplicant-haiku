@@ -48,6 +48,7 @@ static void wpas_conf_ap_vht(struct wpa_supplicant *wpa_s,
 			     struct hostapd_config *conf,
 			     struct hostapd_hw_modes *mode)
 {
+#ifdef CONFIG_P2P
 	u8 center_chan = 0;
 	u8 channel = conf->channel;
 
@@ -66,6 +67,10 @@ static void wpas_conf_ap_vht(struct wpa_supplicant *wpa_s,
 no_vht:
 	conf->vht_oper_centr_freq_seg0_idx =
 		channel + conf->secondary_channel * 2;
+#else /* CONFIG_P2P */
+	conf->vht_oper_centr_freq_seg0_idx =
+		conf->channel + conf->secondary_channel * 2;
+#endif /* CONFIG_P2P */
 }
 #endif /* CONFIG_IEEE80211N */
 
@@ -297,6 +302,11 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 		bss->wpa_group_rekey = 86400;
 	}
 
+#ifdef CONFIG_IEEE80211W
+	if (ssid->ieee80211w != MGMT_FRAME_PROTECTION_DEFAULT)
+		bss->ieee80211w = ssid->ieee80211w;
+#endif /* CONFIG_IEEE80211W */
+
 #ifdef CONFIG_WPS
 	/*
 	 * Enable WPS by default for open and WPA/WPA2-Personal network, but
@@ -306,12 +316,10 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 	if (bss->ssid.security_policy != SECURITY_WPA_PSK &&
 	    bss->ssid.security_policy != SECURITY_PLAINTEXT)
 		goto no_wps;
-#ifdef CONFIG_WPS2
 	if (bss->ssid.security_policy == SECURITY_WPA_PSK &&
 	    (!(bss->rsn_pairwise & WPA_CIPHER_CCMP) || !(bss->wpa & 2)))
 		goto no_wps; /* WPS2 does not allow WPA/TKIP-only
 			      * configuration */
-#endif /* CONFIG_WPS2 */
 	bss->eap_server = 1;
 
 	if (!ssid->ignore_broadcast_ssid)
@@ -505,17 +513,13 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 	params.ssid = ssid->ssid;
 	params.ssid_len = ssid->ssid_len;
 	switch (ssid->mode) {
-	case WPAS_MODE_INFRA:
-		params.mode = IEEE80211_MODE_INFRA;
-		break;
-	case WPAS_MODE_IBSS:
-		params.mode = IEEE80211_MODE_IBSS;
-		break;
 	case WPAS_MODE_AP:
 	case WPAS_MODE_P2P_GO:
 	case WPAS_MODE_P2P_GROUP_FORMATION:
 		params.mode = IEEE80211_MODE_AP;
 		break;
+	default:
+		return -1;
 	}
 	if (ssid->frequency == 0)
 		ssid->frequency = 2462; /* default channel 11 */
@@ -546,6 +550,8 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 
 	if (wpa_s->parent->set_ap_uapsd)
 		params.uapsd = wpa_s->parent->ap_uapsd;
+	else if (params.p2p && (wpa_s->drv_flags & WPA_DRIVER_FLAGS_AP_UAPSD))
+		params.uapsd = 1; /* mandatory for P2P GO */
 	else
 		params.uapsd = -1;
 
@@ -671,6 +677,9 @@ void wpa_supplicant_ap_deinit(struct wpa_supplicant *wpa_s)
 		wpa_s->ap_iface->bss[0]->p2p_group = NULL;
 	wpas_p2p_group_deinit(wpa_s);
 #endif /* CONFIG_P2P */
+	wpa_s->ap_iface->driver_ap_teardown =
+		!!(wpa_s->drv_flags & WPA_DRIVER_FLAGS_AP_TEARDOWN_SUPPORT);
+
 	hostapd_interface_deinit(wpa_s->ap_iface);
 	hostapd_interface_free(wpa_s->ap_iface);
 	wpa_s->ap_iface = NULL;

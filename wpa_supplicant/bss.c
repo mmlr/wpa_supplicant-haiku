@@ -98,6 +98,7 @@ static struct wpa_bss_anqp * wpa_bss_anqp_clone(struct wpa_bss_anqp *anqp)
 	ANQP_DUP(hs20_wan_metrics);
 	ANQP_DUP(hs20_connection_capability);
 	ANQP_DUP(hs20_operating_class);
+	ANQP_DUP(hs20_osu_providers_list);
 #endif /* CONFIG_HS20 */
 #undef ANQP_DUP
 
@@ -166,6 +167,7 @@ static void wpa_bss_anqp_free(struct wpa_bss_anqp *anqp)
 	wpabuf_free(anqp->hs20_wan_metrics);
 	wpabuf_free(anqp->hs20_connection_capability);
 	wpabuf_free(anqp->hs20_operating_class);
+	wpabuf_free(anqp->hs20_osu_providers_list);
 #endif /* CONFIG_HS20 */
 
 	os_free(anqp);
@@ -672,7 +674,8 @@ void wpa_bss_update_scan_res(struct wpa_supplicant *wpa_s,
 		wpa_s->last_scan_res_size = siz;
 	}
 
-	wpa_s->last_scan_res[wpa_s->last_scan_res_used++] = bss;
+	if (wpa_s->last_scan_res)
+		wpa_s->last_scan_res[wpa_s->last_scan_res_used++] = bss;
 }
 
 

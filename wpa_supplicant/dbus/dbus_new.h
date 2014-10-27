@@ -83,7 +83,7 @@ enum wpas_dbus_bss_prop {
 #define	WPAS_DBUS_NEW_IFACE_P2P_GROUPMEMBER \
 	WPAS_DBUS_NEW_INTERFACE ".GroupMember"
 
-/* Errors */
+/* Top-level Errors */
 #define WPAS_DBUS_ERROR_UNKNOWN_ERROR \
 	WPAS_DBUS_NEW_INTERFACE ".UnknownError"
 #define WPAS_DBUS_ERROR_INVALID_ARGS \
@@ -91,6 +91,8 @@ enum wpas_dbus_bss_prop {
 
 #define WPAS_DBUS_ERROR_IFACE_EXISTS \
 	WPAS_DBUS_NEW_INTERFACE ".InterfaceExists"
+#define WPAS_DBUS_ERROR_IFACE_DISABLED            \
+	WPAS_DBUS_NEW_INTERFACE ".InterfaceDisabled"
 #define WPAS_DBUS_ERROR_IFACE_UNKNOWN \
 	WPAS_DBUS_NEW_INTERFACE ".InterfaceUnknown"
 
@@ -118,6 +120,9 @@ enum wpas_dbus_bss_prop {
 #define WPAS_DBUS_ERROR_SUBSCRIPTION_EPERM \
 	WPAS_DBUS_NEW_INTERFACE ".SubscriptionNotYou"
 
+/* Interface-level errors */
+#define WPAS_DBUS_ERROR_IFACE_SCAN_ERROR \
+	WPAS_DBUS_NEW_IFACE_INTERFACE ".ScanError"
 
 void wpas_dbus_subscribe_noc(struct wpas_dbus_priv *priv);
 void wpas_dbus_unsubscribe_noc(struct wpas_dbus_priv *priv);
