@@ -739,6 +739,10 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 #ifdef CONFIG_MACSEC
 	INT(macsec_policy);
 #endif /* CONFIG_MACSEC */
+#ifdef CONFIG_HS20
+	INT(update_identifier);
+#endif /* CONFIG_HS20 */
+	write_int(f, "mac_addr", ssid->mac_addr, -1);
 
 #undef STR
 #undef INT
@@ -790,7 +794,8 @@ static void wpa_config_write_cred(FILE *f, struct wpa_cred *cred)
 		const char *name;
 		name = eap_get_name(cred->eap_method[0].vendor,
 				    cred->eap_method[0].method);
-		fprintf(f, "\teap=%s\n", name);
+		if (name)
+			fprintf(f, "\teap=%s\n", name);
 	}
 	if (cred->phase1)
 		fprintf(f, "\tphase1=\"%s\"\n", cred->phase1);
@@ -1015,6 +1020,9 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
 		fprintf(f, "p2p_intra_bss=%u\n", config->p2p_intra_bss);
 	if (config->p2p_group_idle)
 		fprintf(f, "p2p_group_idle=%u\n", config->p2p_group_idle);
+	if (config->p2p_passphrase_len)
+		fprintf(f, "p2p_passphrase_len=%u\n",
+			config->p2p_passphrase_len);
 	if (config->p2p_pref_chan) {
 		unsigned int i;
 		fprintf(f, "p2p_pref_chan=");
@@ -1034,6 +1042,10 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
 	}
 	if (config->p2p_add_cli_chan)
 		fprintf(f, "p2p_add_cli_chan=%d\n", config->p2p_add_cli_chan);
+	if (config->p2p_optimize_listen_chan !=
+	    DEFAULT_P2P_OPTIMIZE_LISTEN_CHAN)
+		fprintf(f, "p2p_optimize_listen_chan=%d\n",
+			config->p2p_optimize_listen_chan);
 	if (config->p2p_go_ht40)
 		fprintf(f, "p2p_go_ht40=%u\n", config->p2p_go_ht40);
 	if (config->p2p_go_vht)
@@ -1159,11 +1171,25 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
 			config->tdls_external_control);
 
 	if (config->wowlan_triggers)
-		fprintf(f, "wowlan_triggers=\"%s\"\n",
+		fprintf(f, "wowlan_triggers=%s\n",
 			config->wowlan_triggers);
 
 	if (config->bgscan)
 		fprintf(f, "bgscan=\"%s\"\n", config->bgscan);
+
+	if (config->p2p_search_delay != DEFAULT_P2P_SEARCH_DELAY)
+		fprintf(f, "p2p_search_delay=%u\n",
+			config->p2p_search_delay);
+
+	if (config->mac_addr)
+		fprintf(f, "mac_addr=%d\n", config->mac_addr);
+
+	if (config->rand_addr_lifetime != DEFAULT_RAND_ADDR_LIFETIME)
+		fprintf(f, "rand_addr_lifetime=%u\n",
+			config->rand_addr_lifetime);
+
+	if (config->preassoc_mac_addr)
+		fprintf(f, "preassoc_mac_addr=%d\n", config->preassoc_mac_addr);
 }
 
 #endif /* CONFIG_NO_CONFIG_WRITE */

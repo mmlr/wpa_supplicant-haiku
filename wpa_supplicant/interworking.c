@@ -796,8 +796,8 @@ static int build_root_nai(char *nai, size_t nai_len, const char *imsi,
 		*pos++ = imsi[4];
 		*pos++ = imsi[5];
 	}
-	pos += os_snprintf(pos, end - pos, ".mcc%c%c%c.3gppnetwork.org",
-			   imsi[0], imsi[1], imsi[2]);
+	os_snprintf(pos, end - pos, ".mcc%c%c%c.3gppnetwork.org",
+		    imsi[0], imsi[1], imsi[2]);
 
 	return 0;
 }
@@ -1515,6 +1515,7 @@ static int interworking_connect_helper(struct wpa_supplicant *wpa_s,
 	u16 count, i;
 	char buf[100];
 	int excluded = 0, *excl = allow_excluded ? &excluded : NULL;
+	const char *name;
 
 	if (wpa_s->conf->cred == NULL || bss == NULL)
 		return -1;
@@ -1728,11 +1729,12 @@ static int interworking_connect_helper(struct wpa_supplicant *wpa_s,
 		if (wpa_config_set(ssid, "pac_file",
 				   "\"blob://pac_interworking\"", 0) < 0)
 			goto fail;
-		os_snprintf(buf, sizeof(buf), "\"auth=%s\"",
-			    eap_get_name(EAP_VENDOR_IETF,
-					 eap->inner_method ?
-					 eap->inner_method :
-					 EAP_TYPE_MSCHAPV2));
+		name = eap_get_name(EAP_VENDOR_IETF,
+				    eap->inner_method ? eap->inner_method :
+				    EAP_TYPE_MSCHAPV2);
+		if (name == NULL)
+			goto fail;
+		os_snprintf(buf, sizeof(buf), "\"auth=%s\"", name);
 		if (wpa_config_set(ssid, "phase2", buf, 0) < 0)
 			goto fail;
 		break;
@@ -2899,7 +2901,7 @@ int gas_send_request(struct wpa_supplicant *wpa_s, const u8 *dst,
 	struct wpa_bss *bss;
 	int res;
 	size_t len;
-	u8 query_resp_len_limit = 0, pame_bi = 0;
+	u8 query_resp_len_limit = 0;
 
 	freq = wpa_s->assoc_freq;
 	bss = wpa_bss_get_bssid(wpa_s, dst);
@@ -2923,8 +2925,7 @@ int gas_send_request(struct wpa_supplicant *wpa_s, const u8 *dst,
 	/* Advertisement Protocol IE */
 	wpabuf_put_u8(buf, WLAN_EID_ADV_PROTO);
 	wpabuf_put_u8(buf, 1 + wpabuf_len(adv_proto)); /* Length */
-	wpabuf_put_u8(buf, (query_resp_len_limit & 0x7f) |
-		      (pame_bi ? 0x80 : 0));
+	wpabuf_put_u8(buf, query_resp_len_limit & 0x7f);
 	wpabuf_put_buf(buf, adv_proto);
 
 	/* GAS Query */

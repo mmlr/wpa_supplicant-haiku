@@ -297,6 +297,7 @@ void wpa_supplicant_initiate_eapol(struct wpa_supplicant *wpa_s)
 		wpa_s->key_mgmt != WPA_KEY_MGMT_IEEE8021X_NO_WPA &&
 		wpa_s->key_mgmt != WPA_KEY_MGMT_WPS;
 	eapol_conf.external_sim = wpa_s->conf->external_sim;
+	eapol_conf.wps = wpa_s->key_mgmt == WPA_KEY_MGMT_WPS;
 	eapol_sm_notify_config(wpa_s->eapol, &ssid->eap, &eapol_conf);
 #endif /* IEEE8021X_EAPOL */
 
@@ -375,6 +376,8 @@ void free_hw_features(struct wpa_supplicant *wpa_s)
 
 static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 {
+	int i;
+
 	bgscan_deinit(wpa_s);
 	autoscan_deinit(wpa_s);
 	scard_deinit(wpa_s->scard);
@@ -399,11 +402,6 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 
 	os_free(wpa_s->confanother);
 	wpa_s->confanother = NULL;
-
-#ifdef CONFIG_P2P
-	os_free(wpa_s->conf_p2p_dev);
-	wpa_s->conf_p2p_dev = NULL;
-#endif /* CONFIG_P2P */
 
 	wpa_sm_set_eapol(wpa_s->wpa, NULL);
 	eapol_sm_deinit(wpa_s->eapol);
@@ -447,9 +445,7 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 	wpa_supplicant_ap_deinit(wpa_s);
 #endif /* CONFIG_AP */
 
-#ifdef CONFIG_P2P
 	wpas_p2p_deinit(wpa_s);
-#endif /* CONFIG_P2P */
 
 #ifdef CONFIG_OFFCHANNEL
 	offchannel_deinit(wpa_s);
@@ -500,6 +496,11 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 #ifdef CONFIG_HS20
 	hs20_deinit(wpa_s);
 #endif /* CONFIG_HS20 */
+
+	for (i = 0; i < NUM_VENDOR_ELEM_FRAMES; i++) {
+		wpabuf_free(wpa_s->vendor_elem[i]);
+		wpa_s->vendor_elem[i] = NULL;
+	}
 }
 
 
@@ -705,9 +706,7 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 #endif /* IEEE8021X_EAPOL */
 		wpa_s->after_wps = 0;
 		wpa_s->known_wps_freq = 0;
-#ifdef CONFIG_P2P
 		wpas_p2p_completed(wpa_s);
-#endif /* CONFIG_P2P */
 
 		sme_sched_obss_scan(wpa_s, 1);
 	} else if (state == WPA_DISCONNECTED || state == WPA_ASSOCIATING ||
@@ -736,6 +735,12 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 
 	if (wpa_s->wpa_state != old_state) {
 		wpas_notify_state_changed(wpa_s, wpa_s->wpa_state, old_state);
+
+		/*
+		 * Notify the P2P Device interface about a state change in one
+		 * of the interfaces.
+		 */
+		wpas_p2p_indicate_state_change(wpa_s);
 
 		if (wpa_s->wpa_state == WPA_COMPLETED ||
 		    old_state == WPA_COMPLETED)
@@ -984,6 +989,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 	} else if (bss_osen && (ssid->proto & WPA_PROTO_OSEN)) {
 		wpa_dbg(wpa_s, MSG_DEBUG, "HS 2.0: using OSEN");
 		/* TODO: parse OSEN element */
+		os_memset(&ie, 0, sizeof(ie));
 		ie.group_cipher = WPA_CIPHER_CCMP;
 		ie.pairwise_cipher = WPA_CIPHER_CCMP;
 		ie.key_mgmt = WPA_KEY_MGMT_OSEN;
@@ -1272,13 +1278,18 @@ static void wpas_ext_capab_byte(struct wpa_supplicant *wpa_s, u8 *pos, int idx)
 }
 
 
-int wpas_build_ext_capab(struct wpa_supplicant *wpa_s, u8 *buf)
+int wpas_build_ext_capab(struct wpa_supplicant *wpa_s, u8 *buf, size_t buflen)
 {
 	u8 *pos = buf;
 	u8 len = 6, i;
 
 	if (len < wpa_s->extended_capa_len)
 		len = wpa_s->extended_capa_len;
+	if (buflen < (size_t) len + 2) {
+		wpa_printf(MSG_INFO,
+			   "Not enough room for building extended capabilities element");
+		return -1;
+	}
 
 	*pos++ = WLAN_EID_EXT_CAPAB;
 	*pos++ = len;
@@ -1364,6 +1375,68 @@ void wpas_connect_work_done(struct wpa_supplicant *wpa_s)
 }
 
 
+int wpas_update_random_addr(struct wpa_supplicant *wpa_s, int style)
+{
+	struct os_reltime now;
+	u8 addr[ETH_ALEN];
+
+	os_get_reltime(&now);
+	if (wpa_s->last_mac_addr_style == style &&
+	    wpa_s->last_mac_addr_change.sec != 0 &&
+	    !os_reltime_expired(&now, &wpa_s->last_mac_addr_change,
+				wpa_s->conf->rand_addr_lifetime)) {
+		wpa_msg(wpa_s, MSG_DEBUG,
+			"Previously selected random MAC address has not yet expired");
+		return 0;
+	}
+
+	switch (style) {
+	case 1:
+		if (random_mac_addr(addr) < 0)
+			return -1;
+		break;
+	case 2:
+		os_memcpy(addr, wpa_s->perm_addr, ETH_ALEN);
+		if (random_mac_addr_keep_oui(addr) < 0)
+			return -1;
+		break;
+	default:
+		return -1;
+	}
+
+	if (wpa_drv_set_mac_addr(wpa_s, addr) < 0) {
+		wpa_msg(wpa_s, MSG_INFO,
+			"Failed to set random MAC address");
+		return -1;
+	}
+
+	os_get_reltime(&wpa_s->last_mac_addr_change);
+	wpa_s->mac_addr_changed = 1;
+	wpa_s->last_mac_addr_style = style;
+
+	if (wpa_supplicant_update_mac_addr(wpa_s) < 0) {
+		wpa_msg(wpa_s, MSG_INFO,
+			"Could not update MAC address information");
+		return -1;
+	}
+
+	wpa_msg(wpa_s, MSG_DEBUG, "Using random MAC address " MACSTR,
+		MAC2STR(addr));
+
+	return 0;
+}
+
+
+int wpas_update_random_addr_disassoc(struct wpa_supplicant *wpa_s)
+{
+	if (wpa_s->wpa_state >= WPA_AUTHENTICATING ||
+	    !wpa_s->conf->preassoc_mac_addr)
+		return 0;
+
+	return wpas_update_random_addr(wpa_s, wpa_s->conf->preassoc_mac_addr);
+}
+
+
 static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit);
 
 /**
@@ -1378,6 +1451,34 @@ void wpa_supplicant_associate(struct wpa_supplicant *wpa_s,
 			      struct wpa_bss *bss, struct wpa_ssid *ssid)
 {
 	struct wpa_connect_work *cwork;
+	int rand_style;
+
+	if (ssid->mac_addr == -1)
+		rand_style = wpa_s->conf->mac_addr;
+	else
+		rand_style = ssid->mac_addr;
+
+	if (wpa_s->last_ssid == ssid) {
+		wpa_dbg(wpa_s, MSG_DEBUG, "Re-association to the same ESS");
+	} else if (rand_style > 0) {
+		if (wpas_update_random_addr(wpa_s, rand_style) < 0)
+			return;
+		wpa_sm_pmksa_cache_flush(wpa_s->wpa, ssid);
+	} else if (wpa_s->mac_addr_changed) {
+		if (wpa_drv_set_mac_addr(wpa_s, NULL) < 0) {
+			wpa_msg(wpa_s, MSG_INFO,
+				"Could not restore permanent MAC address");
+			return;
+		}
+		wpa_s->mac_addr_changed = 0;
+		if (wpa_supplicant_update_mac_addr(wpa_s) < 0) {
+			wpa_msg(wpa_s, MSG_INFO,
+				"Could not update MAC address information");
+			return;
+		}
+		wpa_msg(wpa_s, MSG_DEBUG, "Using permanent MAC address");
+	}
+	wpa_s->last_ssid = ssid;
 
 #ifdef CONFIG_IBSS_RSN
 	ibss_rsn_deinit(wpa_s->ibss_rsn);
@@ -1648,10 +1749,15 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 		hs20 = wpabuf_alloc(20);
 		if (hs20) {
 			int pps_mo_id = hs20_get_pps_mo_id(wpa_s, ssid);
+			size_t len;
+
 			wpas_hs20_add_indication(hs20, pps_mo_id);
-			os_memcpy(wpa_ie + wpa_ie_len, wpabuf_head(hs20),
-				  wpabuf_len(hs20));
-			wpa_ie_len += wpabuf_len(hs20);
+			len = sizeof(wpa_ie) - wpa_ie_len;
+			if (wpabuf_len(hs20) <= len) {
+				os_memcpy(wpa_ie + wpa_ie_len,
+					  wpabuf_head(hs20), wpabuf_len(hs20));
+				wpa_ie_len += wpabuf_len(hs20);
+			}
 			wpabuf_free(hs20);
 		}
 	}
@@ -1666,9 +1772,10 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 	 * interoperability issues.
 	 */
 	if (!bss || wpa_bss_get_ie(bss, WLAN_EID_EXT_CAPAB)) {
-		u8 ext_capab[10];
+		u8 ext_capab[18];
 		int ext_capab_len;
-		ext_capab_len = wpas_build_ext_capab(wpa_s, ext_capab);
+		ext_capab_len = wpas_build_ext_capab(wpa_s, ext_capab,
+						     sizeof(ext_capab));
 		if (ext_capab_len > 0) {
 			u8 *pos = wpa_ie;
 			if (wpa_ie_len > 0 && pos[0] == WLAN_EID_RSN)
@@ -1728,7 +1835,7 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 				   MAC2STR(bss->bssid), bss->freq,
 				   ssid->bssid_set);
 			params.bssid = bss->bssid;
-			params.freq = bss->freq;
+			params.freq.freq = bss->freq;
 		}
 		params.bssid_hint = bss->bssid;
 		params.freq_hint = bss->freq;
@@ -1744,8 +1851,23 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 	}
 
 	if (ssid->mode == WPAS_MODE_IBSS && ssid->frequency > 0 &&
-	    params.freq == 0)
-		params.freq = ssid->frequency; /* Initial channel for IBSS */
+	    params.freq.freq == 0) {
+		enum hostapd_hw_mode hw_mode;
+		u8 channel;
+
+		params.freq.freq = ssid->frequency;
+
+		hw_mode = ieee80211_freq_to_chan(ssid->frequency, &channel);
+		for (i = 0; wpa_s->hw.modes && i < wpa_s->hw.num_modes; i++) {
+			if (wpa_s->hw.modes[i].mode == hw_mode) {
+				struct hostapd_hw_modes *mode;
+
+				mode = &wpa_s->hw.modes[i];
+				params.freq.ht_enabled = ht_supported(mode);
+				break;
+			}
+		}
+	}
 
 	if (ssid->mode == WPAS_MODE_IBSS) {
 		if (ssid->beacon_int)
@@ -1829,13 +1951,12 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 	if (wpa_s->num_multichan_concurrent < 2) {
 		int freq, num;
 		num = get_shared_radio_freqs(wpa_s, &freq, 1);
-		if (num > 0 && freq > 0 && freq != params.freq) {
+		if (num > 0 && freq > 0 && freq != params.freq.freq) {
 			wpa_printf(MSG_DEBUG,
 				   "Assoc conflicting freq found (%d != %d)",
-				   freq, params.freq);
-			if (wpas_p2p_handle_frequency_conflicts(wpa_s,
-								params.freq,
-								ssid) < 0)
+				   freq, params.freq.freq);
+			if (wpas_p2p_handle_frequency_conflicts(
+				    wpa_s, params.freq.freq, ssid) < 0)
 				return;
 		}
 	}
@@ -2640,6 +2761,8 @@ int wpa_supplicant_update_mac_addr(struct wpa_supplicant *wpa_s)
 		return -1;
 	}
 
+	wpa_sm_set_own_addr(wpa_s->wpa, wpa_s->own_addr);
+
 	return 0;
 }
 
@@ -2687,6 +2810,7 @@ int wpa_supplicant_driver_init(struct wpa_supplicant *wpa_s)
 
 	wpa_dbg(wpa_s, MSG_DEBUG, "Own MAC address: " MACSTR,
 		MAC2STR(wpa_s->own_addr));
+	os_memcpy(wpa_s->perm_addr, wpa_s->own_addr, ETH_ALEN);
 	wpa_sm_set_own_addr(wpa_s->wpa, wpa_s->own_addr);
 
 	if (wpa_s->bridge_ifname[0]) {
@@ -2821,7 +2945,7 @@ static int wpa_disable_max_amsdu(struct wpa_supplicant *wpa_s,
 				 struct ieee80211_ht_capabilities *htcaps_mask,
 				 int disabled)
 {
-	u16 msk;
+	le16 msk;
 
 	wpa_msg(wpa_s, MSG_DEBUG, "set_disable_max_amsdu: %d", disabled);
 
@@ -2894,8 +3018,8 @@ static int wpa_set_disable_ht40(struct wpa_supplicant *wpa_s,
 				int disabled)
 {
 	/* Masking these out disables HT40 */
-	u16 msk = host_to_le16(HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET |
-			       HT_CAP_INFO_SHORT_GI40MHZ);
+	le16 msk = host_to_le16(HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET |
+				HT_CAP_INFO_SHORT_GI40MHZ);
 
 	wpa_msg(wpa_s, MSG_DEBUG, "set_disable_ht40: %d", disabled);
 
@@ -2916,8 +3040,8 @@ static int wpa_set_disable_sgi(struct wpa_supplicant *wpa_s,
 			       int disabled)
 {
 	/* Masking these out disables SGI */
-	u16 msk = host_to_le16(HT_CAP_INFO_SHORT_GI20MHZ |
-			       HT_CAP_INFO_SHORT_GI40MHZ);
+	le16 msk = host_to_le16(HT_CAP_INFO_SHORT_GI20MHZ |
+				HT_CAP_INFO_SHORT_GI40MHZ);
 
 	wpa_msg(wpa_s, MSG_DEBUG, "set_disable_sgi: %d", disabled);
 
@@ -2938,7 +3062,7 @@ static int wpa_set_disable_ldpc(struct wpa_supplicant *wpa_s,
 			       int disabled)
 {
 	/* Masking these out disables LDPC */
-	u16 msk = host_to_le16(HT_CAP_INFO_LDPC_CODING_CAP);
+	le16 msk = host_to_le16(HT_CAP_INFO_LDPC_CODING_CAP);
 
 	wpa_msg(wpa_s, MSG_DEBUG, "set_disable_ldpc: %d", disabled);
 
@@ -2979,7 +3103,7 @@ void wpa_supplicant_apply_ht_overrides(
 	wpa_set_disable_ldpc(wpa_s, htcaps, htcaps_mask, ssid->disable_ldpc);
 
 	if (ssid->ht40_intolerant) {
-		u16 bit = host_to_le16(HT_CAP_INFO_40MHZ_INTOLERANT);
+		le16 bit = host_to_le16(HT_CAP_INFO_40MHZ_INTOLERANT);
 		htcaps->ht_capabilities_info |= bit;
 		htcaps_mask->ht_capabilities_info |= bit;
 	}
@@ -3141,8 +3265,8 @@ static int wpas_check_wowlan_trigger(const char *start, const char *trigger,
 }
 
 
-int wpas_set_wowlan_triggers(struct wpa_supplicant *wpa_s,
-			     struct wpa_driver_capa *capa)
+static int wpas_set_wowlan_triggers(struct wpa_supplicant *wpa_s,
+				    struct wpa_driver_capa *capa)
 {
 	struct wowlan_triggers triggers;
 	char *start, *end, *buf;
@@ -3538,11 +3662,6 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		wpa_s->confanother = os_rel2abs_path(iface->confanother);
 		wpa_config_read(wpa_s->confanother, wpa_s->conf);
 
-#ifdef CONFIG_P2P
-		wpa_s->conf_p2p_dev = os_rel2abs_path(iface->conf_p2p_dev);
-		wpa_config_read(wpa_s->conf_p2p_dev, wpa_s->conf);
-#endif /* CONFIG_P2P */
-
 		/*
 		 * Override ctrl_interface and driver_param if set on command
 		 * line.
@@ -3718,12 +3837,10 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-#ifdef CONFIG_P2P
 	if (iface->p2p_mgmt && wpas_p2p_init(wpa_s->global, wpa_s) < 0) {
 		wpa_msg(wpa_s, MSG_ERROR, "Failed to init P2P");
 		return -1;
 	}
-#endif /* CONFIG_P2P */
 
 	if (wpa_bss_init(wpa_s) < 0)
 		return -1;
@@ -3774,16 +3891,7 @@ static void wpa_supplicant_deinit_iface(struct wpa_supplicant *wpa_s,
 	}
 
 	wpa_supplicant_cleanup(wpa_s);
-
-#ifdef CONFIG_P2P
-	if (wpa_s == wpa_s->parent)
-		wpas_p2p_group_remove(wpa_s, "*");
-	if (wpa_s == wpa_s->global->p2p_init_wpa_s && wpa_s->global->p2p) {
-		wpa_dbg(wpa_s, MSG_DEBUG, "P2P: Disable P2P since removing "
-			"the management interface is being removed");
-		wpas_p2p_deinit_global(wpa_s->global);
-	}
-#endif /* CONFIG_P2P */
+	wpas_p2p_deinit_iface(wpa_s);
 
 	wpas_ctrl_radio_work_flush(wpa_s);
 	radio_remove_interface(wpa_s);
@@ -4212,11 +4320,7 @@ void wpa_supplicant_update_config(struct wpa_supplicant *wpa_s)
 #ifdef CONFIG_WPS
 	wpas_wps_update_config(wpa_s);
 #endif /* CONFIG_WPS */
-
-#ifdef CONFIG_P2P
 	wpas_p2p_update_config(wpa_s);
-#endif /* CONFIG_P2P */
-
 	wpa_s->conf->changed_parameters = 0;
 }
 
@@ -4396,7 +4500,7 @@ int wpa_supplicant_ctrl_iface_ctrl_rsp_handle(struct wpa_supplicant *wpa_s,
 			wpa_s->reassociate = 1;
 		break;
 	case WPA_CTRL_REQ_EAP_PASSWORD:
-		os_free(eap->password);
+		bin_clear_free(eap->password, eap->password_len);
 		eap->password = (u8 *) os_strdup(value);
 		eap->password_len = os_strlen(value);
 		eap->pending_req_password = 0;
@@ -4404,7 +4508,7 @@ int wpa_supplicant_ctrl_iface_ctrl_rsp_handle(struct wpa_supplicant *wpa_s,
 			wpa_s->reassociate = 1;
 		break;
 	case WPA_CTRL_REQ_EAP_NEW_PASSWORD:
-		os_free(eap->new_password);
+		bin_clear_free(eap->new_password, eap->new_password_len);
 		eap->new_password = (u8 *) os_strdup(value);
 		eap->new_password_len = os_strlen(value);
 		eap->pending_req_new_password = 0;
@@ -4412,14 +4516,14 @@ int wpa_supplicant_ctrl_iface_ctrl_rsp_handle(struct wpa_supplicant *wpa_s,
 			wpa_s->reassociate = 1;
 		break;
 	case WPA_CTRL_REQ_EAP_PIN:
-		os_free(eap->pin);
+		str_clear_free(eap->pin);
 		eap->pin = os_strdup(value);
 		eap->pending_req_pin = 0;
 		if (ssid == wpa_s->current_ssid)
 			wpa_s->reassociate = 1;
 		break;
 	case WPA_CTRL_REQ_EAP_OTP:
-		os_free(eap->otp);
+		bin_clear_free(eap->otp, eap->otp_len);
 		eap->otp = (u8 *) os_strdup(value);
 		eap->otp_len = os_strlen(value);
 		os_free(eap->pending_req_otp);
@@ -4427,14 +4531,14 @@ int wpa_supplicant_ctrl_iface_ctrl_rsp_handle(struct wpa_supplicant *wpa_s,
 		eap->pending_req_otp_len = 0;
 		break;
 	case WPA_CTRL_REQ_EAP_PASSPHRASE:
-		os_free(eap->private_key_passwd);
-		eap->private_key_passwd = (u8 *) os_strdup(value);
+		str_clear_free(eap->private_key_passwd);
+		eap->private_key_passwd = os_strdup(value);
 		eap->pending_req_passphrase = 0;
 		if (ssid == wpa_s->current_ssid)
 			wpa_s->reassociate = 1;
 		break;
 	case WPA_CTRL_REQ_SIM:
-		os_free(eap->external_sim_resp);
+		str_clear_free(eap->external_sim_resp);
 		eap->external_sim_resp = os_strdup(value);
 		break;
 	default:
@@ -4633,24 +4737,30 @@ void wpas_request_connection(struct wpa_supplicant *wpa_s)
 }
 
 
-void dump_freq_array(struct wpa_supplicant *wpa_s, const char *title,
-		     int *freq_array, unsigned int len)
+void dump_freq_data(struct wpa_supplicant *wpa_s, const char *title,
+		    struct wpa_used_freq_data *freqs_data,
+		    unsigned int len)
 {
 	unsigned int i;
 
 	wpa_dbg(wpa_s, MSG_DEBUG, "Shared frequencies (len=%u): %s",
 		len, title);
-	for (i = 0; i < len; i++)
-		wpa_dbg(wpa_s, MSG_DEBUG, "freq[%u]: %d", i, freq_array[i]);
+	for (i = 0; i < len; i++) {
+		struct wpa_used_freq_data *cur = &freqs_data[i];
+		wpa_dbg(wpa_s, MSG_DEBUG, "freq[%u]: %d, flags=0x%X",
+			i, cur->freq, cur->flags);
+	}
 }
 
 
 /*
  * Find the operating frequencies of any of the virtual interfaces that
- * are using the same radio as the current interface.
+ * are using the same radio as the current interface, and in addition, get
+ * information about the interface types that are using the frequency.
  */
-int get_shared_radio_freqs(struct wpa_supplicant *wpa_s,
-			   int *freq_array, unsigned int len)
+int get_shared_radio_freqs_data(struct wpa_supplicant *wpa_s,
+				struct wpa_used_freq_data *freqs_data,
+				unsigned int len)
 {
 	struct wpa_supplicant *ifs;
 	u8 bssid[ETH_ALEN];
@@ -4659,31 +4769,12 @@ int get_shared_radio_freqs(struct wpa_supplicant *wpa_s,
 
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"Determining shared radio frequencies (max len %u)", len);
-	os_memset(freq_array, 0, sizeof(int) * len);
-
-	/* First add the frequency of the local interface */
-	if (wpa_s->current_ssid != NULL && wpa_s->assoc_freq != 0) {
-		if (wpa_s->current_ssid->mode == WPAS_MODE_AP ||
-		    wpa_s->current_ssid->mode == WPAS_MODE_P2P_GO)
-			freq_array[idx++] = wpa_s->current_ssid->frequency;
-		else if (wpa_drv_get_bssid(wpa_s, bssid) == 0)
-			freq_array[idx++] = wpa_s->assoc_freq;
-	}
-
-	/* If get_radio_name is not supported, use only the local freq */
-	if (!wpa_driver_get_radio_name(wpa_s)) {
-		freq = wpa_drv_shared_freq(wpa_s);
-		if (freq > 0 && idx < len &&
-		    (idx == 0 || freq_array[0] != freq))
-			freq_array[idx++] = freq;
-		dump_freq_array(wpa_s, "No get_radio_name", freq_array, idx);
-		return idx;
-	}
+	os_memset(freqs_data, 0, sizeof(struct wpa_used_freq_data) * len);
 
 	dl_list_for_each(ifs, &wpa_s->radio->ifaces, struct wpa_supplicant,
 			 radio_list) {
-		if (wpa_s == ifs)
-			continue;
+		if (idx == len)
+			break;
 
 		if (ifs->current_ssid == NULL || ifs->assoc_freq == 0)
 			continue;
@@ -4698,13 +4789,45 @@ int get_shared_radio_freqs(struct wpa_supplicant *wpa_s,
 
 		/* Hold only distinct freqs */
 		for (i = 0; i < idx; i++)
-			if (freq_array[i] == freq)
+			if (freqs_data[i].freq == freq)
 				break;
 
 		if (i == idx)
-			freq_array[idx++] = freq;
+			freqs_data[idx++].freq = freq;
+
+		if (ifs->current_ssid->mode == WPAS_MODE_INFRA) {
+			freqs_data[i].flags = ifs->current_ssid->p2p_group ?
+				WPA_FREQ_USED_BY_P2P_CLIENT :
+				WPA_FREQ_USED_BY_INFRA_STATION;
+		}
 	}
 
-	dump_freq_array(wpa_s, "completed iteration", freq_array, idx);
+	dump_freq_data(wpa_s, "completed iteration", freqs_data, idx);
 	return idx;
+}
+
+
+/*
+ * Find the operating frequencies of any of the virtual interfaces that
+ * are using the same radio as the current interface.
+ */
+int get_shared_radio_freqs(struct wpa_supplicant *wpa_s,
+			   int *freq_array, unsigned int len)
+{
+	struct wpa_used_freq_data *freqs_data;
+	int num, i;
+
+	os_memset(freq_array, 0, sizeof(int) * len);
+
+	freqs_data = os_calloc(len, sizeof(struct wpa_used_freq_data));
+	if (!freqs_data)
+		return -1;
+
+	num = get_shared_radio_freqs_data(wpa_s, freqs_data, len);
+	for (i = 0; i < num; i++)
+		freq_array[i] = freqs_data[i].freq;
+
+	os_free(freqs_data);
+
+	return num;
 }

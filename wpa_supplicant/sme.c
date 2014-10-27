@@ -151,7 +151,7 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_IEEE80211R */
 	int i, bssid_changed;
 	struct wpabuf *resp = NULL;
-	u8 ext_capab[10];
+	u8 ext_capab[18];
 	int ext_capab_len;
 
 	if (bss == NULL) {
@@ -361,17 +361,24 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		hs20 = wpabuf_alloc(20);
 		if (hs20) {
 			int pps_mo_id = hs20_get_pps_mo_id(wpa_s, ssid);
+			size_t len;
+
 			wpas_hs20_add_indication(hs20, pps_mo_id);
-			os_memcpy(wpa_s->sme.assoc_req_ie +
-				  wpa_s->sme.assoc_req_ie_len,
-				  wpabuf_head(hs20), wpabuf_len(hs20));
-			wpa_s->sme.assoc_req_ie_len += wpabuf_len(hs20);
+			len = sizeof(wpa_s->sme.assoc_req_ie) -
+				wpa_s->sme.assoc_req_ie_len;
+			if (wpabuf_len(hs20) <= len) {
+				os_memcpy(wpa_s->sme.assoc_req_ie +
+					  wpa_s->sme.assoc_req_ie_len,
+					  wpabuf_head(hs20), wpabuf_len(hs20));
+				wpa_s->sme.assoc_req_ie_len += wpabuf_len(hs20);
+			}
 			wpabuf_free(hs20);
 		}
 	}
 #endif /* CONFIG_HS20 */
 
-	ext_capab_len = wpas_build_ext_capab(wpa_s, ext_capab);
+	ext_capab_len = wpas_build_ext_capab(wpa_s, ext_capab,
+					     sizeof(ext_capab));
 	if (ext_capab_len > 0) {
 		u8 *pos = wpa_s->sme.assoc_req_ie;
 		if (wpa_s->sme.assoc_req_ie_len > 0 && pos[0] == WLAN_EID_RSN)
@@ -735,7 +742,7 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
 	params.bssid = bssid;
 	params.ssid = wpa_s->sme.ssid;
 	params.ssid_len = wpa_s->sme.ssid_len;
-	params.freq = wpa_s->sme.freq;
+	params.freq.freq = wpa_s->sme.freq;
 	params.bg_scan_period = wpa_s->current_ssid ?
 		wpa_s->current_ssid->bg_scan_period : -1;
 	params.wpa_ie = wpa_s->sme.assoc_req_ie_len ?
@@ -773,7 +780,7 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
 	wpa_msg(wpa_s, MSG_INFO, "Trying to associate with " MACSTR
 		" (SSID='%s' freq=%d MHz)", MAC2STR(params.bssid),
 		params.ssid ? wpa_ssid_txt(params.ssid, params.ssid_len) : "",
-		params.freq);
+		params.freq.freq);
 
 	wpa_supplicant_set_state(wpa_s, WPA_ASSOCIATING);
 
@@ -1166,6 +1173,7 @@ static void sme_obss_scan_timeout(void *eloop_ctx, void *timeout_ctx)
 
 	os_memset(&params, 0, sizeof(params));
 	wpa_setband_scan_freqs_list(wpa_s, HOSTAPD_MODE_IEEE80211G, &params);
+	params.low_priority = 1;
 	wpa_printf(MSG_DEBUG, "SME OBSS: Request an OBSS scan");
 
 	if (wpa_supplicant_trigger_scan(wpa_s, &params))
@@ -1310,7 +1318,10 @@ static void sme_sa_query_timer(void *eloop_ctx, void *timeout_ctx)
 	wpa_s->sme.sa_query_trans_id = nbuf;
 	wpa_s->sme.sa_query_count++;
 
-	os_get_random(trans_id, WLAN_SA_QUERY_TR_ID_LEN);
+	if (os_get_random(trans_id, WLAN_SA_QUERY_TR_ID_LEN) < 0) {
+		wpa_printf(MSG_DEBUG, "Could not generate SA Query ID");
+		return;
+	}
 
 	timeout = sa_query_retry_timeout;
 	sec = ((timeout / 1000) * 1024) / 1000;
@@ -1343,6 +1354,7 @@ void sme_event_unprot_disconnect(struct wpa_supplicant *wpa_s, const u8 *sa,
 				 const u8 *da, u16 reason_code)
 {
 	struct wpa_ssid *ssid;
+	struct os_reltime now;
 
 	if (wpa_s->wpa_state != WPA_COMPLETED)
 		return;
@@ -1358,6 +1370,12 @@ void sme_event_unprot_disconnect(struct wpa_supplicant *wpa_s, const u8 *sa,
 		return;
 	if (wpa_s->sme.sa_query_count > 0)
 		return;
+
+	os_get_reltime(&now);
+	if (wpa_s->sme.last_unprot_disconnect.sec &&
+	    !os_reltime_expired(&now, &wpa_s->sme.last_unprot_disconnect, 10))
+		return; /* limit SA Query procedure frequency */
+	wpa_s->sme.last_unprot_disconnect = now;
 
 	wpa_dbg(wpa_s, MSG_DEBUG, "SME: Unprotected disconnect dropped - "
 		"possible AP/STA state mismatch - trigger SA Query");
