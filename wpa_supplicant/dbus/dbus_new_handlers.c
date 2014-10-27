@@ -28,10 +28,6 @@
 #include "dbus_dict_helpers.h"
 #include "dbus_common_i.h"
 
-extern int wpa_debug_level;
-extern int wpa_debug_show_keys;
-extern int wpa_debug_timestamp;
-
 static const char *debug_strings[] = {
 	"excessive", "msgdump", "debug", "info", "warning", "error", NULL
 };
@@ -1236,6 +1232,23 @@ static int wpas_dbus_get_scan_channels(DBusMessage *message,
 }
 
 
+static int wpas_dbus_get_scan_allow_roam(DBusMessage *message,
+					 DBusMessageIter *var,
+					 dbus_bool_t *allow,
+					 DBusMessage **reply)
+{
+	if (dbus_message_iter_get_arg_type(var) != DBUS_TYPE_BOOLEAN) {
+		wpa_printf(MSG_DEBUG, "wpas_dbus_handler_scan[dbus]: "
+			   "Type must be a boolean");
+		*reply = wpas_dbus_error_invalid_args(
+			message, "Wrong Type value type. Boolean required");
+		return -1;
+	}
+	dbus_message_iter_get_basic(var, allow);
+	return 0;
+}
+
+
 /**
  * wpas_dbus_handler_scan - Request a wireless scan on an interface
  * @message: Pointer to incoming dbus message
@@ -1254,6 +1267,7 @@ DBusMessage * wpas_dbus_handler_scan(DBusMessage *message,
 	char *key = NULL, *type = NULL;
 	struct wpa_driver_scan_params params;
 	size_t i;
+	dbus_bool_t allow_roam = 1;
 
 	os_memset(&params, 0, sizeof(params));
 
@@ -1283,6 +1297,12 @@ DBusMessage * wpas_dbus_handler_scan(DBusMessage *message,
 		} else if (os_strcmp(key, "Channels") == 0) {
 			if (wpas_dbus_get_scan_channels(message, &variant_iter,
 							&params, &reply) < 0)
+				goto out;
+		} else if (os_strcmp(key, "AllowRoam") == 0) {
+			if (wpas_dbus_get_scan_allow_roam(message,
+							  &variant_iter,
+							  &allow_roam,
+							  &reply) < 0)
 				goto out;
 		} else {
 			wpa_printf(MSG_DEBUG, "wpas_dbus_handler_scan[dbus]: "
@@ -1331,6 +1351,9 @@ DBusMessage * wpas_dbus_handler_scan(DBusMessage *message,
 						     "Wrong scan type");
 		goto out;
 	}
+
+	if (!allow_roam)
+		wpa_s->scan_res_handler = scan_only_handler;
 
 out:
 	for (i = 0; i < WPAS_MAX_SCAN_SSIDS; i++)
@@ -1479,6 +1502,7 @@ DBusMessage * wpas_dbus_handler_remove_network(DBusMessage *message,
 	char *iface = NULL, *net_id = NULL;
 	int id;
 	struct wpa_ssid *ssid;
+	int was_disabled;
 
 	dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &op,
 			      DBUS_TYPE_INVALID);
@@ -1505,6 +1529,8 @@ DBusMessage * wpas_dbus_handler_remove_network(DBusMessage *message,
 		goto out;
 	}
 
+	was_disabled = ssid->disabled;
+
 	wpas_notify_network_removed(wpa_s, ssid);
 
 	if (wpa_config_remove_network(wpa_s->conf, id) < 0) {
@@ -1520,6 +1546,13 @@ DBusMessage * wpas_dbus_handler_remove_network(DBusMessage *message,
 	if (ssid == wpa_s->current_ssid)
 		wpa_supplicant_deauthenticate(wpa_s,
 					      WLAN_REASON_DEAUTH_LEAVING);
+	else if (!was_disabled && wpa_s->sched_scanning) {
+		wpa_printf(MSG_DEBUG, "Stop ongoing sched_scan to remove "
+			   "network from filters");
+		wpa_supplicant_cancel_sched_scan(wpa_s);
+		wpa_supplicant_req_scan(wpa_s, 0, 0);
+	}
+
 
 out:
 	os_free(iface);
@@ -1559,6 +1592,9 @@ static void remove_network(void *arg, struct wpa_ssid *ssid)
 DBusMessage * wpas_dbus_handler_remove_all_networks(
 	DBusMessage *message, struct wpa_supplicant *wpa_s)
 {
+	if (wpa_s->sched_scanning)
+		wpa_supplicant_cancel_sched_scan(wpa_s);
+
 	/* NB: could check for failure and return an error */
 	wpa_config_foreach_network(wpa_s->conf, remove_network, wpa_s);
 	return NULL;
@@ -1682,6 +1718,8 @@ out:
 #endif /* IEEE8021X_EAPOL */
 }
 
+
+#ifndef CONFIG_NO_CONFIG_BLOBS
 
 /**
  * wpas_dbus_handler_add_blob - Store named binary blob (ie, for certificates)
@@ -1847,6 +1885,9 @@ DBusMessage * wpas_dbus_handler_remove_blob(DBusMessage *message,
 
 }
 
+#endif /* CONFIG_NO_CONFIG_BLOBS */
+
+
 /*
  * wpas_dbus_handler_flush_bss - Flush the BSS cache
  * @message: Pointer to incoming dbus message
@@ -1920,6 +1961,259 @@ DBusMessage * wpas_dbus_handler_autoscan(DBusMessage *message,
 #endif /* CONFIG_AUTOSCAN */
 
 
+/*
+ * wpas_dbus_handler_eap_logoff - IEEE 802.1X EAPOL state machine logoff
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: NULL
+ *
+ * Handler function for "EAPLogoff" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_eap_logoff(DBusMessage *message,
+					   struct wpa_supplicant *wpa_s)
+{
+	eapol_sm_notify_logoff(wpa_s->eapol, TRUE);
+	return NULL;
+}
+
+
+/*
+ * wpas_dbus_handler_eap_logon - IEEE 802.1X EAPOL state machine logon
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: NULL
+ *
+ * Handler function for "EAPLogin" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_eap_logon(DBusMessage *message,
+					  struct wpa_supplicant *wpa_s)
+{
+	eapol_sm_notify_logoff(wpa_s->eapol, FALSE);
+	return NULL;
+}
+
+
+#ifdef CONFIG_TDLS
+
+static DBusMessage * get_peer_hwaddr_helper(DBusMessage *message,
+					    const char *func_name,
+					    u8 *peer_address)
+{
+	const char *peer_string;
+
+	if (!dbus_message_get_args(message, NULL,
+				   DBUS_TYPE_STRING, &peer_string,
+				   DBUS_TYPE_INVALID))
+		return wpas_dbus_error_invalid_args(message, NULL);
+
+	if (hwaddr_aton(peer_string, peer_address)) {
+		wpa_printf(MSG_DEBUG, "%s: invalid address '%s'",
+			   func_name, peer_string);
+		return wpas_dbus_error_invalid_args(
+			message, "Invalid hardware address format");
+	}
+
+	return NULL;
+}
+
+
+/*
+ * wpas_dbus_handler_tdls_discover - Discover TDLS peer
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: NULL indicating success or DBus error message on failure
+ *
+ * Handler function for "TDLSDiscover" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_tdls_discover(DBusMessage *message,
+					      struct wpa_supplicant *wpa_s)
+{
+	u8 peer[ETH_ALEN];
+	DBusMessage *error_reply;
+	int ret;
+
+	error_reply = get_peer_hwaddr_helper(message, __func__, peer);
+	if (error_reply)
+		return error_reply;
+
+	wpa_printf(MSG_DEBUG, "DBUS TDLS_DISCOVER " MACSTR, MAC2STR(peer));
+
+	if (wpa_tdls_is_external_setup(wpa_s->wpa))
+		ret = wpa_tdls_send_discovery_request(wpa_s->wpa, peer);
+	else
+		ret = wpa_drv_tdls_oper(wpa_s, TDLS_DISCOVERY_REQ, peer);
+
+	if (ret) {
+		return wpas_dbus_error_unknown_error(
+			message, "error performing TDLS discovery");
+	}
+
+	return NULL;
+}
+
+
+/*
+ * wpas_dbus_handler_tdls_setup - Setup TDLS session
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: NULL indicating success or DBus error message on failure
+ *
+ * Handler function for "TDLSSetup" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_tdls_setup(DBusMessage *message,
+					   struct wpa_supplicant *wpa_s)
+{
+	u8 peer[ETH_ALEN];
+	DBusMessage *error_reply;
+	int ret;
+
+	error_reply = get_peer_hwaddr_helper(message, __func__, peer);
+	if (error_reply)
+		return error_reply;
+
+	wpa_printf(MSG_DEBUG, "DBUS TDLS_SETUP " MACSTR, MAC2STR(peer));
+
+	wpa_tdls_remove(wpa_s->wpa, peer);
+	if (wpa_tdls_is_external_setup(wpa_s->wpa))
+		ret = wpa_tdls_start(wpa_s->wpa, peer);
+	else
+		ret = wpa_drv_tdls_oper(wpa_s, TDLS_SETUP, peer);
+
+	if (ret) {
+		return wpas_dbus_error_unknown_error(
+			message, "error performing TDLS setup");
+	}
+
+	return NULL;
+}
+
+
+/*
+ * wpas_dbus_handler_tdls_status - Return TDLS session status
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: A string representing the state of the link to this TDLS peer
+ *
+ * Handler function for "TDLSStatus" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_tdls_status(DBusMessage *message,
+					    struct wpa_supplicant *wpa_s)
+{
+	u8 peer[ETH_ALEN];
+	DBusMessage *reply;
+	const char *tdls_status;
+
+	reply = get_peer_hwaddr_helper(message, __func__, peer);
+	if (reply)
+		return reply;
+
+	wpa_printf(MSG_DEBUG, "DBUS TDLS_STATUS " MACSTR, MAC2STR(peer));
+
+	tdls_status = wpa_tdls_get_link_status(wpa_s->wpa, peer);
+
+	reply = dbus_message_new_method_return(message);
+	dbus_message_append_args(reply, DBUS_TYPE_STRING,
+				 &tdls_status, DBUS_TYPE_INVALID);
+	return reply;
+}
+
+
+/*
+ * wpas_dbus_handler_tdls_teardown - Teardown TDLS session
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: NULL indicating success or DBus error message on failure
+ *
+ * Handler function for "TDLSTeardown" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_tdls_teardown(DBusMessage *message,
+					      struct wpa_supplicant *wpa_s)
+{
+	u8 peer[ETH_ALEN];
+	DBusMessage *error_reply;
+	int ret;
+
+	error_reply = get_peer_hwaddr_helper(message, __func__, peer);
+	if (error_reply)
+		return error_reply;
+
+	wpa_printf(MSG_DEBUG, "DBUS TDLS_TEARDOWN " MACSTR, MAC2STR(peer));
+
+	if (wpa_tdls_is_external_setup(wpa_s->wpa))
+		ret = wpa_tdls_teardown_link(
+			wpa_s->wpa, peer,
+			WLAN_REASON_TDLS_TEARDOWN_UNSPECIFIED);
+	else
+		ret = wpa_drv_tdls_oper(wpa_s, TDLS_TEARDOWN, peer);
+
+	if (ret) {
+		return wpas_dbus_error_unknown_error(
+			message, "error performing TDLS teardown");
+	}
+
+	return NULL;
+}
+
+#endif /* CONFIG_TDLS */
+
+
+/**
+ * wpas_dbus_handler_set_pkcs11_engine_and_module_path - Set PKCS #11 engine and module path
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: %wpa_supplicant data structure
+ * Returns: A dbus message containing an error on failure or NULL on success
+ *
+ * Sets the PKCS #11 engine and module path.
+ */
+DBusMessage * wpas_dbus_handler_set_pkcs11_engine_and_module_path(
+	DBusMessage *message, struct wpa_supplicant *wpa_s)
+{
+	DBusMessageIter iter;
+	char *value = NULL;
+	char *pkcs11_engine_path = NULL;
+	char *pkcs11_module_path = NULL;
+
+	dbus_message_iter_init(message, &iter);
+	dbus_message_iter_get_basic(&iter, &value);
+	if (value == NULL) {
+		return dbus_message_new_error(
+			message, DBUS_ERROR_INVALID_ARGS,
+			"Invalid pkcs11_engine_path argument");
+	}
+	/* Empty path defaults to NULL */
+	if (os_strlen(value))
+		pkcs11_engine_path = value;
+
+	dbus_message_iter_next(&iter);
+	dbus_message_iter_get_basic(&iter, &value);
+	if (value == NULL) {
+		os_free(pkcs11_engine_path);
+		return dbus_message_new_error(
+			message, DBUS_ERROR_INVALID_ARGS,
+			"Invalid pkcs11_module_path argument");
+	}
+	/* Empty path defaults to NULL */
+	if (os_strlen(value))
+		pkcs11_module_path = value;
+
+	if (wpas_set_pkcs11_engine_and_module_path(wpa_s, pkcs11_engine_path,
+						   pkcs11_module_path))
+		return dbus_message_new_error(
+			message, DBUS_ERROR_FAILED,
+			"Reinit of the EAPOL state machine with the new PKCS "
+			"#11 engine and module path failed.");
+
+	wpa_dbus_mark_property_changed(
+		wpa_s->global->dbus, wpa_s->dbus_new_path,
+		WPAS_DBUS_NEW_IFACE_INTERFACE, "PKCS11EnginePath");
+	wpa_dbus_mark_property_changed(
+		wpa_s->global->dbus, wpa_s->dbus_new_path,
+		WPAS_DBUS_NEW_IFACE_INTERFACE, "PKCS11ModulePath");
+
+	return NULL;
+}
+
+
 /**
  * wpas_dbus_getter_capabilities - Return interface capabilities
  * @iter: Pointer to incoming dbus message iter
@@ -1953,7 +2247,7 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 		const char *args[] = {"ccmp", "tkip", "none"};
 		if (!wpa_dbus_dict_append_string_array(
 			    &iter_dict, "Pairwise", args,
-			    sizeof(args) / sizeof(char*)))
+			    ARRAY_SIZE(args)))
 			goto nomem;
 	} else {
 		if (!wpa_dbus_dict_begin_string_array(&iter_dict, "Pairwise",
@@ -1961,6 +2255,18 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 						      &iter_dict_val,
 						      &iter_array))
 			goto nomem;
+
+		if (capa.enc & WPA_DRIVER_CAPA_ENC_CCMP_256) {
+			if (!wpa_dbus_dict_string_array_add_element(
+				    &iter_array, "ccmp-256"))
+				goto nomem;
+		}
+
+		if (capa.enc & WPA_DRIVER_CAPA_ENC_GCMP_256) {
+			if (!wpa_dbus_dict_string_array_add_element(
+				    &iter_array, "gcmp-256"))
+				goto nomem;
+		}
 
 		if (capa.enc & WPA_DRIVER_CAPA_ENC_CCMP) {
 			if (!wpa_dbus_dict_string_array_add_element(
@@ -2000,7 +2306,7 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 		};
 		if (!wpa_dbus_dict_append_string_array(
 			    &iter_dict, "Group", args,
-			    sizeof(args) / sizeof(char*)))
+			    ARRAY_SIZE(args)))
 			goto nomem;
 	} else {
 		if (!wpa_dbus_dict_begin_string_array(&iter_dict, "Group",
@@ -2008,6 +2314,18 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 						      &iter_dict_val,
 						      &iter_array))
 			goto nomem;
+
+		if (capa.enc & WPA_DRIVER_CAPA_ENC_CCMP_256) {
+			if (!wpa_dbus_dict_string_array_add_element(
+				    &iter_array, "ccmp-256"))
+				goto nomem;
+		}
+
+		if (capa.enc & WPA_DRIVER_CAPA_ENC_GCMP_256) {
+			if (!wpa_dbus_dict_string_array_add_element(
+				    &iter_array, "gcmp-256"))
+				goto nomem;
+		}
 
 		if (capa.enc & WPA_DRIVER_CAPA_ENC_CCMP) {
 			if (!wpa_dbus_dict_string_array_add_element(
@@ -2057,7 +2375,7 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 		};
 		if (!wpa_dbus_dict_append_string_array(
 			    &iter_dict, "KeyMgmt", args,
-			    sizeof(args) / sizeof(char*)))
+			    ARRAY_SIZE(args)))
 			goto nomem;
 	} else {
 		if (!wpa_dbus_dict_begin_string_array(&iter_dict, "KeyMgmt",
@@ -2137,7 +2455,7 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 		const char *args[] = { "rsn", "wpa" };
 		if (!wpa_dbus_dict_append_string_array(
 			    &iter_dict, "Protocol", args,
-			    sizeof(args) / sizeof(char*)))
+			    ARRAY_SIZE(args)))
 			goto nomem;
 	} else {
 		if (!wpa_dbus_dict_begin_string_array(&iter_dict, "Protocol",
@@ -2172,7 +2490,7 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 		const char *args[] = { "open", "shared", "leap" };
 		if (!wpa_dbus_dict_append_string_array(
 			    &iter_dict, "AuthAlg", args,
-			    sizeof(args) / sizeof(char*)))
+			    ARRAY_SIZE(args)))
 			goto nomem;
 	} else {
 		if (!wpa_dbus_dict_begin_string_array(&iter_dict, "AuthAlg",
@@ -2208,7 +2526,7 @@ dbus_bool_t wpas_dbus_getter_capabilities(DBusMessageIter *iter,
 
 	/***** Scan */
 	if (!wpa_dbus_dict_append_string_array(&iter_dict, "Scan", scans,
-					       sizeof(scans) / sizeof(char *)))
+					       ARRAY_SIZE(scans)))
 		goto nomem;
 
 	/***** Modes */
@@ -2936,6 +3254,76 @@ out:
 
 
 /**
+ * wpas_dbus_getter_pkcs11_engine_path - Get PKCS #11 engine path
+ * @iter: Pointer to incoming dbus message iter
+ * @error: Location to store error on failure
+ * @user_data: Function specific data
+ * Returns: A dbus message containing the PKCS #11 engine path
+ *
+ * Getter for "PKCS11EnginePath" property.
+ */
+dbus_bool_t wpas_dbus_getter_pkcs11_engine_path(DBusMessageIter *iter,
+						DBusError *error,
+						void *user_data)
+{
+	struct wpa_supplicant *wpa_s = user_data;
+	const char *pkcs11_engine_path;
+
+	if (wpa_s->conf == NULL) {
+		wpa_printf(MSG_ERROR,
+			   "wpas_dbus_getter_pkcs11_engine_path[dbus]: An "
+			   "error occurred getting the PKCS #11 engine path.");
+		dbus_set_error_const(
+			error, DBUS_ERROR_FAILED,
+			"An error occured getting the PKCS #11 engine path.");
+		return FALSE;
+	}
+
+	if (wpa_s->conf->pkcs11_engine_path == NULL)
+		pkcs11_engine_path = "";
+	else
+		pkcs11_engine_path = wpa_s->conf->pkcs11_engine_path;
+	return wpas_dbus_simple_property_getter(iter, DBUS_TYPE_STRING,
+						&pkcs11_engine_path, error);
+}
+
+
+/**
+ * wpas_dbus_getter_pkcs11_module_path - Get PKCS #11 module path
+ * @iter: Pointer to incoming dbus message iter
+ * @error: Location to store error on failure
+ * @user_data: Function specific data
+ * Returns: A dbus message containing the PKCS #11 module path
+ *
+ * Getter for "PKCS11ModulePath" property.
+ */
+dbus_bool_t wpas_dbus_getter_pkcs11_module_path(DBusMessageIter *iter,
+						DBusError *error,
+						void *user_data)
+{
+	struct wpa_supplicant *wpa_s = user_data;
+	const char *pkcs11_module_path;
+
+	if (wpa_s->conf == NULL) {
+		wpa_printf(MSG_ERROR,
+			   "wpas_dbus_getter_pkcs11_module_path[dbus]: An "
+			   "error occurred getting the PKCS #11 module path.");
+		dbus_set_error_const(
+			error, DBUS_ERROR_FAILED,
+			"An error occured getting the PKCS #11 module path.");
+		return FALSE;
+	}
+
+	if (wpa_s->conf->pkcs11_module_path == NULL)
+		pkcs11_module_path = "";
+	else
+		pkcs11_module_path = wpa_s->conf->pkcs11_module_path;
+	return wpas_dbus_simple_property_getter(iter, DBUS_TYPE_STRING,
+						&pkcs11_module_path, error);
+}
+
+
+/**
  * wpas_dbus_getter_blobs - Get all blobs defined for this interface
  * @iter: Pointer to incoming dbus message iter
  * @error: Location to store error on failure
@@ -3233,7 +3621,7 @@ static dbus_bool_t wpas_dbus_get_bss_security_prop(DBusMessageIter *iter,
 {
 	DBusMessageIter iter_dict, variant_iter;
 	const char *group;
-	const char *pairwise[3]; /* max 3 pairwise ciphers is supported */
+	const char *pairwise[5]; /* max 5 pairwise ciphers is supported */
 	const char *key_mgmt[7]; /* max 7 key managements may be supported */
 	int n;
 
@@ -3282,6 +3670,12 @@ static dbus_bool_t wpas_dbus_get_bss_security_prop(DBusMessageIter *iter,
 	case WPA_CIPHER_WEP104:
 		group = "wep104";
 		break;
+	case WPA_CIPHER_CCMP_256:
+		group = "ccmp-256";
+		break;
+	case WPA_CIPHER_GCMP_256:
+		group = "gcmp-256";
+		break;
 	default:
 		group = "";
 		break;
@@ -3298,6 +3692,10 @@ static dbus_bool_t wpas_dbus_get_bss_security_prop(DBusMessageIter *iter,
 		pairwise[n++] = "ccmp";
 	if (ie_data->pairwise_cipher & WPA_CIPHER_GCMP)
 		pairwise[n++] = "gcmp";
+	if (ie_data->pairwise_cipher & WPA_CIPHER_CCMP_256)
+		pairwise[n++] = "ccmp-256";
+	if (ie_data->pairwise_cipher & WPA_CIPHER_GCMP_256)
+		pairwise[n++] = "gcmp-256";
 
 	if (!wpa_dbus_dict_append_string_array(&iter_dict, "Pairwise",
 					       pairwise, n))

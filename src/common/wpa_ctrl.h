@@ -44,6 +44,8 @@ extern "C" {
 #define WPA_EVENT_EAP_PEER_CERT "CTRL-EVENT-EAP-PEER-CERT "
 /** EAP TLS certificate chain validation error */
 #define WPA_EVENT_EAP_TLS_CERT_ERROR "CTRL-EVENT-EAP-TLS-CERT-ERROR "
+/** EAP status */
+#define WPA_EVENT_EAP_STATUS "CTRL-EVENT-EAP-STATUS "
 /** EAP authentication completed successfully */
 #define WPA_EVENT_EAP_SUCCESS "CTRL-EVENT-EAP-SUCCESS "
 /** EAP authentication failed (EAP-Failure received) */
@@ -52,6 +54,8 @@ extern "C" {
 #define WPA_EVENT_TEMP_DISABLED "CTRL-EVENT-SSID-TEMP-DISABLED "
 /** Temporarily disabled network block re-enabled */
 #define WPA_EVENT_REENABLED "CTRL-EVENT-SSID-REENABLED "
+/** New scan started */
+#define WPA_EVENT_SCAN_STARTED "CTRL-EVENT-SCAN-STARTED "
 /** New scan results available */
 #define WPA_EVENT_SCAN_RESULTS "CTRL-EVENT-SCAN-RESULTS "
 /** wpa_supplicant state change */
@@ -61,6 +65,17 @@ extern "C" {
 /** A BSS entry was removed (followed by BSS entry id and BSSID) */
 #define WPA_EVENT_BSS_REMOVED "CTRL-EVENT-BSS-REMOVED "
 
+/** RSN IBSS 4-way handshakes completed with specified peer */
+#define IBSS_RSN_COMPLETED "IBSS-RSN-COMPLETED "
+
+/** Notification of frequency conflict due to a concurrent operation.
+ *
+ * The indicated network is disabled and needs to be re-enabled before it can
+ * be used again.
+ */
+#define WPA_EVENT_FREQ_CONFLICT "CTRL-EVENT-FREQ-CONFLICT "
+/** Frequency ranges that the driver recommends to avoid */
+#define WPA_EVENT_AVOID_FREQ "CTRL-EVENT-AVOID-FREQ "
 /** WPS overlap detected in PBC mode */
 #define WPS_EVENT_OVERLAP "WPS-OVERLAP-DETECTED "
 /** Available WPS AP with active PBC found in scan results */
@@ -82,6 +97,10 @@ extern "C" {
 #define WPS_EVENT_SUCCESS "WPS-SUCCESS "
 /** WPS enrollment attempt timed out and was terminated */
 #define WPS_EVENT_TIMEOUT "WPS-TIMEOUT "
+/* PBC mode was activated */
+#define WPS_EVENT_ACTIVE "WPS-PBC-ACTIVE "
+/* PBC mode was disabled */
+#define WPS_EVENT_DISABLE "WPS-PBC-DISABLE "
 
 #define WPS_EVENT_ENROLLEE_SEEN "WPS-ENROLLEE-SEEN "
 
@@ -129,11 +148,28 @@ extern "C" {
 #define P2P_EVENT_INVITATION_RECEIVED "P2P-INVITATION-RECEIVED "
 #define P2P_EVENT_INVITATION_RESULT "P2P-INVITATION-RESULT "
 #define P2P_EVENT_FIND_STOPPED "P2P-FIND-STOPPED "
+#define P2P_EVENT_PERSISTENT_PSK_FAIL "P2P-PERSISTENT-PSK-FAIL id="
+#define P2P_EVENT_PRESENCE_RESPONSE "P2P-PRESENCE-RESPONSE "
+#define P2P_EVENT_NFC_BOTH_GO "P2P-NFC-BOTH-GO "
+#define P2P_EVENT_NFC_PEER_CLIENT "P2P-NFC-PEER-CLIENT "
+#define P2P_EVENT_NFC_WHILE_CLIENT "P2P-NFC-WHILE-CLIENT "
+
+/* parameters: <PMF enabled> <timeout in ms> <Session Information URL> */
+#define ESS_DISASSOC_IMMINENT "ESS-DISASSOC-IMMINENT "
+#define P2P_EVENT_REMOVE_AND_REFORM_GROUP "P2P-REMOVE-AND-REFORM-GROUP "
 
 #define INTERWORKING_AP "INTERWORKING-AP "
 #define INTERWORKING_NO_MATCH "INTERWORKING-NO-MATCH "
+#define INTERWORKING_ALREADY_CONNECTED "INTERWORKING-ALREADY-CONNECTED "
 
 #define GAS_RESPONSE_INFO "GAS-RESPONSE-INFO "
+/* parameters: <addr> <dialog_token> <freq> */
+#define GAS_QUERY_START "GAS-QUERY-START "
+/* parameters: <addr> <dialog_token> <freq> <status_code> <result> */
+#define GAS_QUERY_DONE "GAS-QUERY-DONE "
+
+#define EXT_RADIO_WORK_START "EXT-RADIO-WORK-START "
+#define EXT_RADIO_WORK_TIMEOUT "EXT-RADIO-WORK-TIMEOUT "
 
 /* hostapd control interface - fixed message prefixes */
 #define WPS_EVENT_PIN_NEEDED "WPS-PIN-NEEDED "
@@ -146,10 +182,27 @@ extern "C" {
 #define AP_STA_CONNECTED "AP-STA-CONNECTED "
 #define AP_STA_DISCONNECTED "AP-STA-DISCONNECTED "
 
+#define AP_REJECTED_MAX_STA "AP-REJECTED-MAX-STA "
+#define AP_REJECTED_BLOCKED_STA "AP-REJECTED-BLOCKED-STA "
+
+#define AP_EVENT_ENABLED "AP-ENABLED "
+#define AP_EVENT_DISABLED "AP-DISABLED "
+
+#define ACS_EVENT_STARTED "ACS-STARTED "
+#define ACS_EVENT_COMPLETED "ACS-COMPLETED "
+#define ACS_EVENT_FAILED "ACS-FAILED "
+
+#define DFS_EVENT_RADAR_DETECTED "DFS-RADAR-DETECTED "
+#define DFS_EVENT_NEW_CHANNEL "DFS-NEW-CHANNEL "
+#define DFS_EVENT_CAC_START "DFS-CAC-START "
+#define DFS_EVENT_CAC_COMPLETED "DFS-CAC-COMPLETED "
+#define DFS_EVENT_NOP_FINISHED "DFS-NOP-FINISHED "
+
+#define AP_CSA_FINISHED "AP-CSA-FINISHED "
 
 /* BSS command information masks */
 
-#define WPA_BSS_MASK_ALL		0xFFFFFFFF
+#define WPA_BSS_MASK_ALL		0xFFFDFFFF
 #define WPA_BSS_MASK_ID			BIT(0)
 #define WPA_BSS_MASK_BSSID		BIT(1)
 #define WPA_BSS_MASK_FREQ		BIT(2)
@@ -167,6 +220,7 @@ extern "C" {
 #define WPA_BSS_MASK_P2P_SCAN		BIT(14)
 #define WPA_BSS_MASK_INTERNETW		BIT(15)
 #define WPA_BSS_MASK_WIFI_DISPLAY	BIT(16)
+#define WPA_BSS_MASK_DELIM		BIT(17)
 
 
 /* wpa_supplicant/hostapd control interface access */

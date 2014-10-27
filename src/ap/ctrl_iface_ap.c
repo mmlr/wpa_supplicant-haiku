@@ -1,6 +1,6 @@
 /*
  * Control interface for shared AP commands
- * Copyright (c) 2004-2009, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2013, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -10,6 +10,7 @@
 
 #include "utils/common.h"
 #include "common/ieee802_11_defs.h"
+#include "eapol_auth/eapol_auth_sm.h"
 #include "hostapd.h"
 #include "ieee802_1x.h"
 #include "wpa_auth.h"
@@ -21,25 +22,61 @@
 #include "ap_drv_ops.h"
 
 
+static int hostapd_get_sta_tx_rx(struct hostapd_data *hapd,
+				 struct sta_info *sta,
+				 char *buf, size_t buflen)
+{
+	struct hostap_sta_driver_data data;
+	int ret;
+
+	if (hostapd_drv_read_sta_data(hapd, &data, sta->addr) < 0)
+		return 0;
+
+	ret = os_snprintf(buf, buflen, "rx_packets=%lu\ntx_packets=%lu\n"
+			  "rx_bytes=%lu\ntx_bytes=%lu\n",
+			  data.rx_packets, data.tx_packets,
+			  data.rx_bytes, data.tx_bytes);
+	if (ret < 0 || (size_t) ret >= buflen)
+		return 0;
+	return ret;
+}
+
+
 static int hostapd_get_sta_conn_time(struct sta_info *sta,
 				     char *buf, size_t buflen)
 {
-	struct os_time now, age;
-	int len = 0, ret;
+	struct os_reltime age;
+	int ret;
 
 	if (!sta->connected_time.sec)
 		return 0;
 
-	os_get_time(&now);
-	os_time_sub(&now, &sta->connected_time, &age);
+	os_reltime_age(&sta->connected_time, &age);
 
-	ret = os_snprintf(buf + len, buflen - len, "connected_time=%u\n",
+	ret = os_snprintf(buf, buflen, "connected_time=%u\n",
 			  (unsigned int) age.sec);
-	if (ret < 0 || (size_t) ret >= buflen - len)
-		return len;
-	len += ret;
+	if (ret < 0 || (size_t) ret >= buflen)
+		return 0;
+	return ret;
+}
 
-	return len;
+
+static const char * timeout_next_str(int val)
+{
+	switch (val) {
+	case STA_NULLFUNC:
+		return "NULLFUNC POLL";
+	case STA_DISASSOC:
+		return "DISASSOC";
+	case STA_DEAUTH:
+		return "DEAUTH";
+	case STA_REMOVE:
+		return "REMOVE";
+	case STA_DISASSOC_FROM_CLI:
+		return "DISASSOC_FROM_CLI";
+	}
+
+	return "?";
 }
 
 
@@ -47,18 +84,41 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 				      struct sta_info *sta,
 				      char *buf, size_t buflen)
 {
-	int len, res, ret;
+	int len, res, ret, i;
 
-	if (sta == NULL) {
-		ret = os_snprintf(buf, buflen, "FAIL\n");
-		if (ret < 0 || (size_t) ret >= buflen)
-			return 0;
-		return ret;
-	}
+	if (!sta)
+		return 0;
 
 	len = 0;
-	ret = os_snprintf(buf + len, buflen - len, MACSTR "\n",
+	ret = os_snprintf(buf + len, buflen - len, MACSTR "\nflags=",
 			  MAC2STR(sta->addr));
+	if (ret < 0 || (size_t) ret >= buflen - len)
+		return len;
+	len += ret;
+
+	ret = ap_sta_flags_txt(sta->flags, buf + len, buflen - len);
+	if (ret < 0)
+		return len;
+	len += ret;
+
+	ret = os_snprintf(buf + len, buflen - len, "\naid=%d\ncapability=0x%x\n"
+			  "listen_interval=%d\nsupported_rates=",
+			  sta->aid, sta->capability, sta->listen_interval);
+	if (ret < 0 || (size_t) ret >= buflen - len)
+		return len;
+	len += ret;
+
+	for (i = 0; i < sta->supported_rates_len; i++) {
+		ret = os_snprintf(buf + len, buflen - len, "%02x%s",
+				  sta->supported_rates[i],
+				  i + 1 < sta->supported_rates_len ? " " : "");
+		if (ret < 0 || (size_t) ret >= buflen - len)
+			return len;
+		len += ret;
+	}
+
+	ret = os_snprintf(buf + len, buflen - len, "\ntimeout_next=%s\n",
+			  timeout_next_str(sta->timeout_next));
 	if (ret < 0 || (size_t) ret >= buflen - len)
 		return len;
 	len += ret;
@@ -80,9 +140,8 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 	if (res >= 0)
 		len += res;
 
-	res = hostapd_get_sta_conn_time(sta, buf + len, buflen - len);
-	if (res >= 0)
-		len += res;
+	len += hostapd_get_sta_tx_rx(hapd, sta, buf + len, buflen - len);
+	len += hostapd_get_sta_conn_time(sta, buf + len, buflen - len);
 
 	return len;
 }
@@ -100,6 +159,8 @@ int hostapd_ctrl_iface_sta(struct hostapd_data *hapd, const char *txtaddr,
 {
 	u8 addr[ETH_ALEN];
 	int ret;
+	const char *pos;
+	struct sta_info *sta;
 
 	if (hwaddr_aton(txtaddr, addr)) {
 		ret = os_snprintf(buf, buflen, "FAIL\n");
@@ -107,8 +168,28 @@ int hostapd_ctrl_iface_sta(struct hostapd_data *hapd, const char *txtaddr,
 			return 0;
 		return ret;
 	}
-	return hostapd_ctrl_iface_sta_mib(hapd, ap_get_sta(hapd, addr),
-					  buf, buflen);
+
+	sta = ap_get_sta(hapd, addr);
+	if (sta == NULL)
+		return -1;
+
+	pos = os_strchr(txtaddr, ' ');
+	if (pos) {
+		pos++;
+
+#ifdef HOSTAPD_DUMP_STATE
+		if (os_strcmp(pos, "eapol") == 0) {
+			if (sta->eapol_sm == NULL)
+				return -1;
+			return eapol_auth_dump_state(sta->eapol_sm, buf,
+						     buflen);
+		}
+#endif /* HOSTAPD_DUMP_STATE */
+
+		return -1;
+	}
+
+	return hostapd_ctrl_iface_sta_mib(hapd, sta, buf, buflen);
 }
 
 
@@ -125,7 +206,11 @@ int hostapd_ctrl_iface_sta_next(struct hostapd_data *hapd, const char *txtaddr,
 		if (ret < 0 || (size_t) ret >= buflen)
 			return 0;
 		return ret;
-	}		
+	}
+
+	if (!sta->next)
+		return 0;
+
 	return hostapd_ctrl_iface_sta_mib(hapd, sta->next, buf, buflen);
 }
 
@@ -189,6 +274,7 @@ int hostapd_ctrl_iface_deauthenticate(struct hostapd_data *hapd,
 	u8 addr[ETH_ALEN];
 	struct sta_info *sta;
 	const char *pos;
+	u16 reason = WLAN_REASON_PREV_AUTH_NOT_VALID;
 
 	wpa_dbg(hapd->msg_ctx, MSG_DEBUG, "CTRL_IFACE DEAUTHENTICATE %s",
 		txtaddr);
@@ -228,11 +314,14 @@ int hostapd_ctrl_iface_deauthenticate(struct hostapd_data *hapd,
 	}
 #endif /* CONFIG_P2P_MANAGER */
 
-	hostapd_drv_sta_deauth(hapd, addr, WLAN_REASON_PREV_AUTH_NOT_VALID);
+	pos = os_strstr(txtaddr, " reason=");
+	if (pos)
+		reason = atoi(pos + 8);
+
+	hostapd_drv_sta_deauth(hapd, addr, reason);
 	sta = ap_get_sta(hapd, addr);
 	if (sta)
-		ap_sta_deauthenticate(hapd, sta,
-				      WLAN_REASON_PREV_AUTH_NOT_VALID);
+		ap_sta_deauthenticate(hapd, sta, reason);
 	else if (addr[0] == 0xff)
 		hostapd_free_stas(hapd);
 
@@ -246,6 +335,7 @@ int hostapd_ctrl_iface_disassociate(struct hostapd_data *hapd,
 	u8 addr[ETH_ALEN];
 	struct sta_info *sta;
 	const char *pos;
+	u16 reason = WLAN_REASON_PREV_AUTH_NOT_VALID;
 
 	wpa_dbg(hapd->msg_ctx, MSG_DEBUG, "CTRL_IFACE DISASSOCIATE %s",
 		txtaddr);
@@ -285,13 +375,136 @@ int hostapd_ctrl_iface_disassociate(struct hostapd_data *hapd,
 	}
 #endif /* CONFIG_P2P_MANAGER */
 
-	hostapd_drv_sta_disassoc(hapd, addr, WLAN_REASON_PREV_AUTH_NOT_VALID);
+	pos = os_strstr(txtaddr, " reason=");
+	if (pos)
+		reason = atoi(pos + 8);
+
+	hostapd_drv_sta_disassoc(hapd, addr, reason);
 	sta = ap_get_sta(hapd, addr);
 	if (sta)
-		ap_sta_disassociate(hapd, sta,
-				    WLAN_REASON_PREV_AUTH_NOT_VALID);
+		ap_sta_disassociate(hapd, sta, reason);
 	else if (addr[0] == 0xff)
 		hostapd_free_stas(hapd);
+
+	return 0;
+}
+
+
+int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
+			      size_t buflen)
+{
+	struct hostapd_iface *iface = hapd->iface;
+	int len = 0, ret;
+	size_t i;
+
+	ret = os_snprintf(buf + len, buflen - len,
+			  "state=%s\n"
+			  "phy=%s\n"
+			  "freq=%d\n"
+			  "num_sta_non_erp=%d\n"
+			  "num_sta_no_short_slot_time=%d\n"
+			  "num_sta_no_short_preamble=%d\n"
+			  "olbc=%d\n"
+			  "num_sta_ht_no_gf=%d\n"
+			  "num_sta_no_ht=%d\n"
+			  "num_sta_ht_20_mhz=%d\n"
+			  "olbc_ht=%d\n"
+			  "ht_op_mode=0x%x\n",
+			  hostapd_state_text(iface->state),
+			  iface->phy,
+			  iface->freq,
+			  iface->num_sta_non_erp,
+			  iface->num_sta_no_short_slot_time,
+			  iface->num_sta_no_short_preamble,
+			  iface->olbc,
+			  iface->num_sta_ht_no_gf,
+			  iface->num_sta_no_ht,
+			  iface->num_sta_ht_20mhz,
+			  iface->olbc_ht,
+			  iface->ht_op_mode);
+	if (ret < 0 || (size_t) ret >= buflen - len)
+		return len;
+	len += ret;
+
+	ret = os_snprintf(buf + len, buflen - len,
+			  "channel=%u\n"
+			  "secondary_channel=%d\n"
+			  "ieee80211n=%d\n"
+			  "ieee80211ac=%d\n"
+			  "vht_oper_chwidth=%d\n"
+			  "vht_oper_centr_freq_seg0_idx=%d\n"
+			  "vht_oper_centr_freq_seg1_idx=%d\n",
+			  iface->conf->channel,
+			  iface->conf->secondary_channel,
+			  iface->conf->ieee80211n,
+			  iface->conf->ieee80211ac,
+			  iface->conf->vht_oper_chwidth,
+			  iface->conf->vht_oper_centr_freq_seg0_idx,
+			  iface->conf->vht_oper_centr_freq_seg1_idx);
+	if (ret < 0 || (size_t) ret >= buflen - len)
+		return len;
+	len += ret;
+
+	for (i = 0; i < iface->num_bss; i++) {
+		struct hostapd_data *bss = iface->bss[i];
+		ret = os_snprintf(buf + len, buflen - len,
+				  "bss[%d]=%s\n"
+				  "bssid[%d]=" MACSTR "\n"
+				  "ssid[%d]=%s\n"
+				  "num_sta[%d]=%d\n",
+				  (int) i, bss->conf->iface,
+				  (int) i, MAC2STR(bss->own_addr),
+				  (int) i,
+				  wpa_ssid_txt(bss->conf->ssid.ssid,
+					       bss->conf->ssid.ssid_len),
+				  (int) i, bss->num_sta);
+		if (ret < 0 || (size_t) ret >= buflen - len)
+			return len;
+		len += ret;
+	}
+
+	return len;
+}
+
+
+int hostapd_parse_csa_settings(const char *pos,
+			       struct csa_settings *settings)
+{
+	char *end;
+
+	if (!settings)
+		return -1;
+
+	os_memset(settings, 0, sizeof(*settings));
+	settings->cs_count = strtol(pos, &end, 10);
+	if (pos == end) {
+		wpa_printf(MSG_ERROR, "chanswitch: invalid cs_count provided");
+		return -1;
+	}
+
+	settings->freq_params.freq = atoi(end);
+	if (settings->freq_params.freq == 0) {
+		wpa_printf(MSG_ERROR, "chanswitch: invalid freq provided");
+		return -1;
+	}
+
+#define SET_CSA_SETTING(str) \
+	do { \
+		const char *pos2 = os_strstr(pos, " " #str "="); \
+		if (pos2) { \
+			pos2 += sizeof(" " #str "=") - 1; \
+			settings->freq_params.str = atoi(pos2); \
+		} \
+	} while (0)
+
+	SET_CSA_SETTING(center_freq1);
+	SET_CSA_SETTING(center_freq2);
+	SET_CSA_SETTING(bandwidth);
+	SET_CSA_SETTING(sec_channel_offset);
+	settings->freq_params.ht_enabled = !!os_strstr(pos, " ht");
+	settings->freq_params.vht_enabled = !!os_strstr(pos, " vht");
+	settings->block_tx = !!os_strstr(pos, " blocktx");
+#undef SET_CSA_SETTING
 
 	return 0;
 }

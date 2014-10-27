@@ -207,6 +207,8 @@ static u8 * wpa_ft_gen_req_ies(struct wpa_sm *sm, size_t *len,
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_802_1X);
 	else if (sm->key_mgmt == WPA_KEY_MGMT_FT_PSK)
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_PSK);
+	else if (sm->key_mgmt == WPA_KEY_MGMT_FT_SAE)
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_SAE);
 	else {
 		wpa_printf(MSG_WARNING, "FT: Invalid key management type (%d)",
 			   sm->key_mgmt);
@@ -400,8 +402,7 @@ int wpa_ft_process_response(struct wpa_sm *sm, const u8 *ies, size_t ies_len,
 		}
 	}
 
-	if (sm->key_mgmt != WPA_KEY_MGMT_FT_IEEE8021X &&
-	    sm->key_mgmt != WPA_KEY_MGMT_FT_PSK) {
+	if (!wpa_key_mgmt_ft(sm->key_mgmt)) {
 		wpa_printf(MSG_DEBUG, "FT: Reject FT IEs since FT is not "
 			   "enabled for this connection");
 		return -1;
@@ -526,11 +527,17 @@ int wpa_ft_is_completed(struct wpa_sm *sm)
 	if (sm == NULL)
 		return 0;
 
-	if (sm->key_mgmt != WPA_KEY_MGMT_FT_IEEE8021X &&
-	    sm->key_mgmt != WPA_KEY_MGMT_FT_PSK)
+	if (!wpa_key_mgmt_ft(sm->key_mgmt))
 		return 0;
 
 	return sm->ft_completed;
+}
+
+
+void wpa_reset_ft_completed(struct wpa_sm *sm)
+{
+	if (sm != NULL)
+		sm->ft_completed = 0;
 }
 
 
@@ -589,6 +596,13 @@ static int wpa_ft_process_gtk_subelem(struct wpa_sm *sm, const u8 *gtk_elem,
 	}
 
 	wpa_hexdump_key(MSG_DEBUG, "FT: GTK from Reassoc Resp", gtk, keylen);
+	if (sm->group_cipher == WPA_CIPHER_TKIP) {
+		/* Swap Tx/Rx keys for Michael MIC */
+		u8 tmp[8];
+		os_memcpy(tmp, gtk + 16, 8);
+		os_memcpy(gtk + 16, gtk + 24, 8);
+		os_memcpy(gtk + 24, tmp, 8);
+	}
 	if (wpa_sm_set_key(sm, alg, broadcast_ether_addr, keyidx, 0,
 			   gtk_elem + 3, rsc_len, gtk, keylen) < 0) {
 		wpa_printf(MSG_WARNING, "WPA: Failed to set GTK to the "
@@ -664,8 +678,7 @@ int wpa_ft_validate_reassoc_resp(struct wpa_sm *sm, const u8 *ies,
 
 	wpa_hexdump(MSG_DEBUG, "FT: Response IEs", ies, ies_len);
 
-	if (sm->key_mgmt != WPA_KEY_MGMT_FT_IEEE8021X &&
-	    sm->key_mgmt != WPA_KEY_MGMT_FT_PSK) {
+	if (!wpa_key_mgmt_ft(sm->key_mgmt)) {
 		wpa_printf(MSG_DEBUG, "FT: Reject FT IEs since FT is not "
 			   "enabled for this connection");
 		return -1;
@@ -788,8 +801,11 @@ int wpa_ft_validate_reassoc_resp(struct wpa_sm *sm, const u8 *ies,
 	if (parse.ric) {
 		wpa_hexdump(MSG_MSGDUMP, "FT: RIC Response",
 			    parse.ric, parse.ric_len);
-		/* TODO: parse response and inform driver about results */
+		/* TODO: parse response and inform driver about results when
+		 * using wpa_supplicant SME */
 	}
+
+	wpa_printf(MSG_DEBUG, "FT: Completed successfully");
 
 	return 0;
 }

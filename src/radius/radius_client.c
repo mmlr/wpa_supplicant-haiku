@@ -122,7 +122,7 @@ struct radius_msg_list {
 	/**
 	 * last_attempt - Time of the last transmission attempt
 	 */
-	struct os_time last_attempt;
+	struct os_reltime last_attempt;
 
 	/**
 	 * shared_secret - Shared secret with the target RADIUS server
@@ -300,7 +300,7 @@ static void radius_client_handle_send_error(struct radius_client_data *radius,
 {
 #ifndef CONFIG_NATIVE_WINDOWS
 	int _errno = errno;
-	perror("send[RADIUS]");
+	wpa_printf(MSG_INFO, "send[RADIUS]: %s", strerror(errno));
 	if (_errno == ENOTCONN || _errno == EDESTADDRREQ || _errno == EINVAL ||
 	    _errno == EBADF) {
 		hostapd_logger(radius->ctx, NULL, HOSTAPD_MODULE_RADIUS,
@@ -351,7 +351,7 @@ static int radius_client_retransmit(struct radius_client_data *radius,
 		       HOSTAPD_LEVEL_DEBUG, "Resending RADIUS message (id=%d)",
 		       radius_msg_get_hdr(entry->msg)->identifier);
 
-	os_get_time(&entry->last_attempt);
+	os_get_reltime(&entry->last_attempt);
 	buf = radius_msg_get_buf(entry->msg);
 	if (send(s, wpabuf_head(buf), wpabuf_len(buf), 0) < 0)
 		radius_client_handle_send_error(radius, s, entry->msg_type);
@@ -361,8 +361,7 @@ static int radius_client_retransmit(struct radius_client_data *radius,
 	if (entry->next_wait > RADIUS_CLIENT_MAX_WAIT)
 		entry->next_wait = RADIUS_CLIENT_MAX_WAIT;
 	if (entry->attempts >= RADIUS_CLIENT_MAX_RETRIES) {
-		printf("Removing un-ACKed RADIUS message due to too many "
-		       "failed retransmit attempts\n");
+		wpa_printf(MSG_INFO, "RADIUS: Removing un-ACKed message due to too many failed retransmit attempts");
 		return 1;
 	}
 
@@ -374,7 +373,7 @@ static void radius_client_timer(void *eloop_ctx, void *timeout_ctx)
 {
 	struct radius_client_data *radius = eloop_ctx;
 	struct hostapd_radius_servers *conf = radius->conf;
-	struct os_time now;
+	struct os_reltime now;
 	os_time_t first;
 	struct radius_msg_list *entry, *prev, *tmp;
 	int auth_failover = 0, acct_failover = 0;
@@ -384,7 +383,7 @@ static void radius_client_timer(void *eloop_ctx, void *timeout_ctx)
 	if (!entry)
 		return;
 
-	os_get_time(&now);
+	os_get_reltime(&now);
 	first = 0;
 
 	prev = NULL;
@@ -482,7 +481,7 @@ static void radius_client_timer(void *eloop_ctx, void *timeout_ctx)
 
 static void radius_client_update_timeout(struct radius_client_data *radius)
 {
-	struct os_time now;
+	struct os_reltime now;
 	os_time_t first;
 	struct radius_msg_list *entry;
 
@@ -498,7 +497,7 @@ static void radius_client_update_timeout(struct radius_client_data *radius)
 			first = entry->next_try;
 	}
 
-	os_get_time(&now);
+	os_get_reltime(&now);
 	if (first < now.sec)
 		first = now.sec;
 	eloop_register_timeout(first - now.sec, 0, radius_client_timer, radius,
@@ -526,7 +525,7 @@ static void radius_client_list_add(struct radius_client_data *radius,
 
 	entry = os_zalloc(sizeof(*entry));
 	if (entry == NULL) {
-		printf("Failed to add RADIUS packet into retransmit list\n");
+		wpa_printf(MSG_INFO, "RADIUS: Failed to add packet into retransmit list");
 		radius_msg_free(msg);
 		return;
 	}
@@ -537,7 +536,7 @@ static void radius_client_list_add(struct radius_client_data *radius,
 	entry->msg_type = msg_type;
 	entry->shared_secret = shared_secret;
 	entry->shared_secret_len = shared_secret_len;
-	os_get_time(&entry->last_attempt);
+	os_get_reltime(&entry->last_attempt);
 	entry->first_try = entry->last_attempt.sec;
 	entry->next_try = entry->first_try + RADIUS_CLIENT_FIRST_WAIT;
 	entry->attempts = 1;
@@ -547,8 +546,7 @@ static void radius_client_list_add(struct radius_client_data *radius,
 	radius_client_update_timeout(radius);
 
 	if (radius->num_msgs >= RADIUS_CLIENT_MAX_ENTRIES) {
-		printf("Removing the oldest un-ACKed RADIUS packet due to "
-		       "retransmit list limits.\n");
+		wpa_printf(MSG_INFO, "RADIUS: Removing the oldest un-ACKed packet due to retransmit list limits");
 		prev = NULL;
 		while (entry->next) {
 			prev = entry;
@@ -694,7 +692,7 @@ static void radius_client_receive(int sock, void *eloop_ctx, void *sock_ctx)
 	struct radius_rx_handler *handlers;
 	size_t num_handlers, i;
 	struct radius_msg_list *req, *prev_req;
-	struct os_time now;
+	struct os_reltime now;
 	struct hostapd_radius_server *rconf;
 	int invalid_authenticator = 0;
 
@@ -710,21 +708,20 @@ static void radius_client_receive(int sock, void *eloop_ctx, void *sock_ctx)
 
 	len = recv(sock, buf, sizeof(buf), MSG_DONTWAIT);
 	if (len < 0) {
-		perror("recv[RADIUS]");
+		wpa_printf(MSG_INFO, "recv[RADIUS]: %s", strerror(errno));
 		return;
 	}
 	hostapd_logger(radius->ctx, NULL, HOSTAPD_MODULE_RADIUS,
 		       HOSTAPD_LEVEL_DEBUG, "Received %d bytes from RADIUS "
 		       "server", len);
 	if (len == sizeof(buf)) {
-		printf("Possibly too long UDP frame for our buffer - "
-		       "dropping it\n");
+		wpa_printf(MSG_INFO, "RADIUS: Possibly too long UDP frame for our buffer - dropping it");
 		return;
 	}
 
 	msg = radius_msg_parse(buf, len);
 	if (msg == NULL) {
-		printf("Parsing incoming RADIUS frame failed\n");
+		wpa_printf(MSG_INFO, "RADIUS: Parsing incoming frame failed");
 		rconf->malformed_responses++;
 		return;
 	}
@@ -775,7 +772,7 @@ static void radius_client_receive(int sock, void *eloop_ctx, void *sock_ctx)
 		goto fail;
 	}
 
-	os_get_time(&now);
+	os_get_reltime(&now);
 	roundtrip = (now.sec - req->last_attempt.sec) * 100 +
 		(now.usec - req->last_attempt.usec) / 10000;
 	hostapd_logger(radius->ctx, req->addr, HOSTAPD_MODULE_RADIUS,
@@ -1041,13 +1038,14 @@ radius_change_server(struct radius_client_data *radius,
 		}
 
 		if (bind(sel_sock, cl_addr, claddrlen) < 0) {
-			perror("bind[radius]");
+			wpa_printf(MSG_INFO, "bind[radius]: %s",
+				   strerror(errno));
 			return -1;
 		}
 	}
 
 	if (connect(sel_sock, addr, addrlen) < 0) {
-		perror("connect[radius]");
+		wpa_printf(MSG_INFO, "connect[radius]: %s", strerror(errno));
 		return -1;
 	}
 
@@ -1123,8 +1121,8 @@ static int radius_client_disable_pmtu_discovery(int s)
 	r = setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, &action,
 		       sizeof(action));
 	if (r == -1)
-		wpa_printf(MSG_ERROR, "Failed to set IP_MTU_DISCOVER: "
-			   "%s", strerror(errno));
+		wpa_printf(MSG_ERROR, "RADIUS: Failed to set IP_MTU_DISCOVER: %s",
+			   strerror(errno));
 #endif
 	return r;
 }
@@ -1137,7 +1135,8 @@ static int radius_client_init_auth(struct radius_client_data *radius)
 
 	radius->auth_serv_sock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (radius->auth_serv_sock < 0)
-		perror("socket[PF_INET,SOCK_DGRAM]");
+		wpa_printf(MSG_INFO, "RADIUS: socket[PF_INET,SOCK_DGRAM]: %s",
+			   strerror(errno));
 	else {
 		radius_client_disable_pmtu_discovery(radius->auth_serv_sock);
 		ok++;
@@ -1146,7 +1145,8 @@ static int radius_client_init_auth(struct radius_client_data *radius)
 #ifdef CONFIG_IPV6
 	radius->auth_serv_sock6 = socket(PF_INET6, SOCK_DGRAM, 0);
 	if (radius->auth_serv_sock6 < 0)
-		perror("socket[PF_INET6,SOCK_DGRAM]");
+		wpa_printf(MSG_INFO, "RADIUS: socket[PF_INET6,SOCK_DGRAM]: %s",
+			   strerror(errno));
 	else
 		ok++;
 #endif /* CONFIG_IPV6 */
@@ -1162,8 +1162,7 @@ static int radius_client_init_auth(struct radius_client_data *radius)
 	    eloop_register_read_sock(radius->auth_serv_sock,
 				     radius_client_receive, radius,
 				     (void *) RADIUS_AUTH)) {
-		printf("Could not register read socket for authentication "
-		       "server\n");
+		wpa_printf(MSG_INFO, "RADIUS: Could not register read socket for authentication server");
 		return -1;
 	}
 
@@ -1172,8 +1171,7 @@ static int radius_client_init_auth(struct radius_client_data *radius)
 	    eloop_register_read_sock(radius->auth_serv_sock6,
 				     radius_client_receive, radius,
 				     (void *) RADIUS_AUTH)) {
-		printf("Could not register read socket for authentication "
-		       "server\n");
+		wpa_printf(MSG_INFO, "RADIUS: Could not register read socket for authentication server");
 		return -1;
 	}
 #endif /* CONFIG_IPV6 */
@@ -1189,7 +1187,8 @@ static int radius_client_init_acct(struct radius_client_data *radius)
 
 	radius->acct_serv_sock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (radius->acct_serv_sock < 0)
-		perror("socket[PF_INET,SOCK_DGRAM]");
+		wpa_printf(MSG_INFO, "RADIUS: socket[PF_INET,SOCK_DGRAM]: %s",
+			   strerror(errno));
 	else {
 		radius_client_disable_pmtu_discovery(radius->acct_serv_sock);
 		ok++;
@@ -1198,7 +1197,8 @@ static int radius_client_init_acct(struct radius_client_data *radius)
 #ifdef CONFIG_IPV6
 	radius->acct_serv_sock6 = socket(PF_INET6, SOCK_DGRAM, 0);
 	if (radius->acct_serv_sock6 < 0)
-		perror("socket[PF_INET6,SOCK_DGRAM]");
+		wpa_printf(MSG_INFO, "RADIUS: socket[PF_INET6,SOCK_DGRAM]: %s",
+			   strerror(errno));
 	else
 		ok++;
 #endif /* CONFIG_IPV6 */
@@ -1214,8 +1214,7 @@ static int radius_client_init_acct(struct radius_client_data *radius)
 	    eloop_register_read_sock(radius->acct_serv_sock,
 				     radius_client_receive, radius,
 				     (void *) RADIUS_ACCT)) {
-		printf("Could not register read socket for accounting "
-		       "server\n");
+		wpa_printf(MSG_INFO, "RADIUS: Could not register read socket for accounting server");
 		return -1;
 	}
 
@@ -1224,8 +1223,7 @@ static int radius_client_init_acct(struct radius_client_data *radius)
 	    eloop_register_read_sock(radius->acct_serv_sock6,
 				     radius_client_receive, radius,
 				     (void *) RADIUS_ACCT)) {
-		printf("Could not register read socket for accounting "
-		       "server\n");
+		wpa_printf(MSG_INFO, "RADIUS: Could not register read socket for accounting server");
 		return -1;
 	}
 #endif /* CONFIG_IPV6 */

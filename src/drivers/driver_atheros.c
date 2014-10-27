@@ -354,19 +354,16 @@ atheros_set_ieee8021x(void *priv, struct wpa_bss_params *params)
 		return atheros_set_privacy(drv, 0);
 	}
 	if (!params->wpa && !params->ieee802_1x) {
-		hostapd_logger(drv->hapd, NULL, HOSTAPD_MODULE_DRIVER,
-			HOSTAPD_LEVEL_WARNING, "No 802.1X or WPA enabled!");
+		wpa_printf(MSG_WARNING, "No 802.1X or WPA enabled!");
 		return -1;
 	}
 	if (params->wpa && atheros_configure_wpa(drv, params) != 0) {
-		hostapd_logger(drv->hapd, NULL, HOSTAPD_MODULE_DRIVER,
-			HOSTAPD_LEVEL_WARNING, "Error configuring WPA state!");
+		wpa_printf(MSG_WARNING, "Error configuring WPA state!");
 		return -1;
 	}
 	if (set80211param(priv, IEEE80211_PARAM_AUTHMODE,
 		(params->wpa ? IEEE80211_AUTH_WPA : IEEE80211_AUTH_8021X))) {
-		hostapd_logger(drv->hapd, NULL, HOSTAPD_MODULE_DRIVER,
-			HOSTAPD_LEVEL_WARNING, "Error enabling WPA/802.1X!");
+		wpa_printf(MSG_WARNING, "Error enabling WPA/802.1X!");
 		return -1;
 	}
 
@@ -809,16 +806,10 @@ static void atheros_raw_recv_11r(void *ctx, const u8 *src_addr, const u8 *buf,
 		drv_event_assoc(drv->hapd, mgmt->sa, iebuf, ielen, 1);
 		break;
 	case WLAN_FC_STYPE_ACTION:
-		if (&mgmt->u.action.category > buf + len)
-			break;
 		os_memset(&event, 0, sizeof(event));
-		event.rx_action.da = mgmt->da;
-		event.rx_action.sa = mgmt->sa;
-		event.rx_action.bssid = mgmt->bssid;
-		event.rx_action.category = mgmt->u.action.category;
-		event.rx_action.data = &mgmt->u.action.category;
-		event.rx_action.len = buf + len - event.rx_action.data;
-		wpa_supplicant_event(drv->hapd, EVENT_RX_ACTION, &event);
+		event.rx_mgmt.frame = buf;
+		event.rx_mgmt.frame_len = len;
+		wpa_supplicant_event(drv->hapd, EVENT_RX_MGMT, &event);
 		break;
 	case WLAN_FC_STYPE_AUTH:
 		if (len - IEEE80211_HDRLEN < sizeof(mgmt->u.auth))
@@ -872,7 +863,58 @@ static void atheros_raw_recv_hs20(void *ctx, const u8 *src_addr, const u8 *buf,
 	event.rx_mgmt.frame_len = len;
 	wpa_supplicant_event(drv->hapd, EVENT_RX_MGMT, &event);
 }
+
 #endif /* CONFIG_HS20 */
+
+
+static int atheros_set_qos_map(void *ctx, const u8 *qos_map_set,
+			       u8 qos_map_set_len)
+{
+#ifdef CONFIG_ATHEROS_QOS_MAP
+	struct atheros_driver_data *drv = ctx;
+	struct ieee80211req_athdbg req;
+	struct ieee80211_qos_map *qos_map = &req.data.qos_map;
+	struct iwreq iwr;
+	int i, up_start;
+
+	if (qos_map_set_len < 16 || qos_map_set_len > 58 ||
+	    qos_map_set_len & 1) {
+		wpa_printf(MSG_ERROR, "Invalid QoS Map");
+		return -1;
+	} else {
+		memset(&req, 0, sizeof(struct ieee80211req_athdbg));
+		req.cmd = IEEE80211_DBGREQ_SETQOSMAPCONF;
+		os_memset(&iwr, 0, sizeof(iwr));
+		os_strlcpy(iwr.ifr_name, drv->iface, sizeof(iwr.ifr_name));
+		iwr.u.data.pointer = (void *) &req;
+		iwr.u.data.length = sizeof(struct ieee80211req_athdbg);
+	}
+
+	qos_map->valid = 1;
+	qos_map->num_dscp_except = (qos_map_set_len - 16) / 2;
+	if (qos_map->num_dscp_except) {
+		for (i = 0; i < qos_map->num_dscp_except; i++) {
+			qos_map->dscp_exception[i].dscp	= qos_map_set[i * 2];
+			qos_map->dscp_exception[i].up =	qos_map_set[i * 2 + 1];
+		}
+	}
+
+	up_start = qos_map_set_len - 16;
+	for (i = 0; i < IEEE80211_MAX_QOS_UP_RANGE; i++) {
+		qos_map->up[i].low = qos_map_set[up_start + (i * 2)];
+		qos_map->up[i].high = qos_map_set[up_start + (i * 2) + 1];
+	}
+
+	if (ioctl(drv->ioctl_sock, IEEE80211_IOCTL_DBGREQ, &iwr) < 0) {
+		perror("ioctl[IEEE80211_IOCTL_DBGREQ]");
+		wpa_printf(MSG_DEBUG, "%s: %s: Failed to set QoS Map",
+			   __func__, drv->iface);
+		return -1;
+	}
+#endif /* CONFIG_ATHEROS_QOS_MAP */
+
+	return 0;
+}
 
 #if defined(CONFIG_WNM) && !defined(CONFIG_IEEE80211R)
 static void atheros_raw_recv_11v(void *ctx, const u8 *src_addr, const u8 *buf,
@@ -906,16 +948,10 @@ static void atheros_raw_recv_11v(void *ctx, const u8 *src_addr, const u8 *buf,
 
 	switch (stype) {
 	case WLAN_FC_STYPE_ACTION:
-		if (&mgmt->u.action.category > buf + len)
-			break;
 		os_memset(&event, 0, sizeof(event));
-		event.rx_action.da = mgmt->da;
-		event.rx_action.sa = mgmt->sa;
-		event.rx_action.bssid = mgmt->bssid;
-		event.rx_action.category = mgmt->u.action.category;
-		event.rx_action.data = &mgmt->u.action.category;
-		event.rx_action.len = buf + len - event.rx_action.data;
-		wpa_supplicant_event(drv->hapd, EVENT_RX_ACTION, &event);
+		event.rx_mgmt.frame = buf;
+		event.rx_mgmt.frame_len = len;
+		wpa_supplicant_event(drv->hapd, EVENT_RX_MGMT, &event);
 		break;
 	default:
 		break;
@@ -1334,7 +1370,7 @@ static void fetch_pending_big_events(struct atheros_driver_data *drv)
 
 	while (1) {
 		os_memset(&iwr, 0, sizeof(iwr));
-		os_strncpy(iwr.ifr_name, drv->iface, IFNAMSIZ);
+		os_strlcpy(iwr.ifr_name, drv->iface, IFNAMSIZ);
 
 		iwr.u.data.pointer = (void *) tbuf;
 		iwr.u.data.length = sizeof(tbuf);
@@ -1963,7 +1999,7 @@ static int atheros_send_action(void *priv, unsigned int freq,
 }
 
 
-#ifdef CONFIG_WNM
+#if defined(CONFIG_WNM) && defined(IEEE80211_APPIE_FRAME_WNM)
 static int athr_wnm_tfs(struct atheros_driver_data *drv, const u8* peer,
 			u8 *ie, u16 *len, enum wnm_oper oper)
 {
@@ -2116,7 +2152,7 @@ static int atheros_wnm_oper(void *priv, enum wnm_oper oper, const u8 *peer,
 		return -1;
 	}
 }
-#endif /* CONFIG_WNM */
+#endif /* CONFIG_WNM && IEEE80211_APPIE_FRAME_WNM */
 
 
 const struct wpa_driver_ops wpa_driver_atheros_ops = {
@@ -2150,7 +2186,8 @@ const struct wpa_driver_ops wpa_driver_atheros_ops = {
 	.add_sta_node    	= atheros_add_sta_node,
 #endif /* CONFIG_IEEE80211R */
 	.send_action		= atheros_send_action,
-#ifdef CONFIG_WNM
+#if defined(CONFIG_WNM) && defined(IEEE80211_APPIE_FRAME_WNM)
 	.wnm_oper		= atheros_wnm_oper,
-#endif /* CONFIG_WNM */
+#endif /* CONFIG_WNM && IEEE80211_APPIE_FRAME_WNM */
+	.set_qos_map		= atheros_set_qos_map,
 };

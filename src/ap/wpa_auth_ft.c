@@ -57,7 +57,7 @@ static int wpa_ft_add_tspec(struct wpa_authenticator *wpa_auth,
 			    u8 *tspec_ie, size_t tspec_ielen)
 {
 	if (wpa_auth->cb.add_tspec == NULL) {
-	        wpa_printf(MSG_DEBUG, "FT: add_tspec is not initialized");
+		wpa_printf(MSG_DEBUG, "FT: add_tspec is not initialized");
 		return -1;
 	}
 	return wpa_auth->cb.add_tspec(wpa_auth->cb.ctx, sta_addr, tspec_ie,
@@ -329,6 +329,7 @@ static int wpa_ft_pull_pmk_r1(struct wpa_authenticator *wpa_auth,
 	os_memcpy(f.pmk_r0_name, pmk_r0_name, WPA_PMK_NAME_LEN);
 	os_memcpy(f.r1kh_id, wpa_auth->conf.r1_key_holder, FT_R1KH_ID_LEN);
 	os_memcpy(f.s1kh_id, s1kh_id, ETH_ALEN);
+	os_memset(f.pad, 0, sizeof(f.pad));
 
 	if (aes_wrap(r0kh->key, (FT_R0KH_R1KH_PULL_DATA_LEN + 7) / 8,
 		     f.nonce, frame.nonce) < 0)
@@ -416,7 +417,7 @@ static u8 * wpa_ft_gtk_subelem(struct wpa_state_machine *sm, size_t *len)
 		pad_len = 8 - pad_len;
 	if (key_len + pad_len < 16)
 		pad_len += 8;
-	if (pad_len) {
+	if (pad_len && key_len < sizeof(keybuf)) {
 		os_memcpy(keybuf, gsm->GTK[gsm->GN - 1], key_len);
 		os_memset(keybuf + key_len, 0, pad_len);
 		keybuf[key_len] = 0xdd;
@@ -569,8 +570,8 @@ static u8 * wpa_ft_process_rdie(struct wpa_state_machine *sm,
 			else {
 				/* TSPEC accepted; include updated TSPEC in
 				 * response */
-		                rdie->descr_count = 1;
-	                        pos += sizeof(*tspec);
+				rdie->descr_count = 1;
+				pos += sizeof(*tspec);
 			}
 			return pos;
 		}
@@ -632,8 +633,7 @@ u8 * wpa_sm_write_assoc_resp_ies(struct wpa_state_machine *sm, u8 *pos,
 
 	conf = &sm->wpa_auth->conf;
 
-	if (sm->wpa_key_mgmt != WPA_KEY_MGMT_FT_IEEE8021X &&
-	    sm->wpa_key_mgmt != WPA_KEY_MGMT_FT_PSK)
+	if (!wpa_key_mgmt_ft(sm->wpa_key_mgmt))
 		return pos;
 
 	end = pos + max_len;
@@ -1166,6 +1166,8 @@ int wpa_ft_action_rx(struct wpa_state_machine *sm, const u8 *data, size_t len)
 
 	/* RRB - Forward action frame to the target AP */
 	frame = os_malloc(sizeof(*frame) + len);
+	if (frame == NULL)
+		return -1;
 	frame->frame_type = RSN_REMOTE_FRAME_TYPE_FT_RRB;
 	frame->packet_type = FT_PACKET_REQUEST;
 	frame->action_length = host_to_le16(len);
@@ -1216,6 +1218,10 @@ static int wpa_ft_rrb_rx_request(struct wpa_authenticator *wpa_auth,
 	rlen = 2 + 2 * ETH_ALEN + 2 + resp_ies_len;
 
 	frame = os_malloc(sizeof(*frame) + rlen);
+	if (frame == NULL) {
+		os_free(resp_ies);
+		return -1;
+	}
 	frame->frame_type = RSN_REMOTE_FRAME_TYPE_FT_RRB;
 	frame->packet_type = FT_PACKET_RESPONSE;
 	frame->action_length = host_to_le16(rlen);
@@ -1311,6 +1317,7 @@ static int wpa_ft_rrb_rx_pull(struct wpa_authenticator *wpa_auth,
 	wpa_hexdump(MSG_DEBUG, "FT: PMKR1Name", r.pmk_r1_name,
 		    WPA_PMK_NAME_LEN);
 	r.pairwise = host_to_le16(pairwise);
+	os_memset(r.pad, 0, sizeof(r.pad));
 
 	if (aes_wrap(r1kh->key, (FT_R0KH_R1KH_RESP_DATA_LEN + 7) / 8,
 		     r.nonce, resp.nonce) < 0) {
@@ -1614,6 +1621,7 @@ static void wpa_ft_generate_pmk_r1(struct wpa_authenticator *wpa_auth,
 	os_get_time(&now);
 	WPA_PUT_LE32(f.timestamp, now.sec);
 	f.pairwise = host_to_le16(pairwise);
+	os_memset(f.pad, 0, sizeof(f.pad));
 	if (aes_wrap(r1kh->key, (FT_R0KH_R1KH_PUSH_DATA_LEN + 7) / 8,
 		     f.timestamp, frame.timestamp) < 0)
 		return;

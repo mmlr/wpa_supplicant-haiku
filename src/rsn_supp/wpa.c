@@ -379,6 +379,8 @@ static void wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
 	struct wpa_ptk *ptk;
 	u8 buf[8];
 	int res;
+	u8 *kde, *kde_buf = NULL;
+	size_t kde_len;
 
 	if (wpa_sm_get_network_ctx(sm) == NULL) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING, "WPA: No SSID info "
@@ -392,7 +394,6 @@ static void wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
 
 	os_memset(&ie, 0, sizeof(ie));
 
-#ifndef CONFIG_NO_WPA2
 	if (sm->proto == WPA_PROTO_RSN) {
 		/* RSN: msg 1/4 should contain PMKID for the selected PMK */
 		const u8 *_buf = (const u8 *) (key + 1);
@@ -405,7 +406,6 @@ static void wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
 				    "Authenticator", ie.pmkid, PMKID_LEN);
 		}
 	}
-#endif /* CONFIG_NO_WPA2 */
 
 	res = wpa_supplicant_get_pmk(sm, src_addr, ie.pmkid);
 	if (res == -2) {
@@ -437,15 +437,39 @@ static void wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
 	os_memcpy(ptk->u.auth.rx_mic_key, buf, 8);
 	sm->tptk_set = 1;
 
+	kde = sm->assoc_wpa_ie;
+	kde_len = sm->assoc_wpa_ie_len;
+
+#ifdef CONFIG_P2P
+	if (sm->p2p) {
+		kde_buf = os_malloc(kde_len + 2 + RSN_SELECTOR_LEN + 1);
+		if (kde_buf) {
+			u8 *pos;
+			wpa_printf(MSG_DEBUG, "P2P: Add IP Address Request KDE "
+				   "into EAPOL-Key 2/4");
+			os_memcpy(kde_buf, kde, kde_len);
+			kde = kde_buf;
+			pos = kde + kde_len;
+			*pos++ = WLAN_EID_VENDOR_SPECIFIC;
+			*pos++ = RSN_SELECTOR_LEN + 1;
+			RSN_SELECTOR_PUT(pos, WFA_KEY_DATA_IP_ADDR_REQ);
+			pos += RSN_SELECTOR_LEN;
+			*pos++ = 0x01;
+			kde_len = pos - kde;
+		}
+	}
+#endif /* CONFIG_P2P */
+
 	if (wpa_supplicant_send_2_of_4(sm, sm->bssid, key, ver, sm->snonce,
-				       sm->assoc_wpa_ie, sm->assoc_wpa_ie_len,
-				       ptk))
+				       kde, kde_len, ptk))
 		goto failed;
 
+	os_free(kde_buf);
 	os_memcpy(sm->anonce, key->key_nonce, WPA_NONCE_LEN);
 	return;
 
 failed:
+	os_free(kde_buf);
 	wpa_sm_deauthenticate(sm, WLAN_REASON_UNSPECIFIED);
 }
 
@@ -664,7 +688,6 @@ static int wpa_supplicant_pairwise_gtk(struct wpa_sm *sm,
 				       const u8 *gtk, size_t gtk_len,
 				       int key_info)
 {
-#ifndef CONFIG_NO_WPA2
 	struct wpa_gtk_data gd;
 
 	/*
@@ -691,10 +714,11 @@ static int wpa_supplicant_pairwise_gtk(struct wpa_sm *sm,
 	os_memcpy(gd.gtk, gtk, gtk_len);
 	gd.gtk_len = gtk_len;
 
-	if (wpa_supplicant_check_group_cipher(sm, sm->group_cipher,
-					      gtk_len, gtk_len,
-					      &gd.key_rsc_len, &gd.alg) ||
-	    wpa_supplicant_install_gtk(sm, &gd, key->key_rsc)) {
+	if (sm->group_cipher != WPA_CIPHER_GTK_NOT_USED &&
+	    (wpa_supplicant_check_group_cipher(sm, sm->group_cipher,
+					       gtk_len, gtk_len,
+					       &gd.key_rsc_len, &gd.alg) ||
+	     wpa_supplicant_install_gtk(sm, &gd, key->key_rsc))) {
 		wpa_dbg(sm->ctx->msg_ctx, MSG_DEBUG,
 			"RSN: Failed to install GTK");
 		return -1;
@@ -703,9 +727,6 @@ static int wpa_supplicant_pairwise_gtk(struct wpa_sm *sm,
 	wpa_supplicant_key_neg_complete(sm, sm->bssid,
 					key_info & WPA_KEY_INFO_SECURE);
 	return 0;
-#else /* CONFIG_NO_WPA2 */
-	return -1;
-#endif /* CONFIG_NO_WPA2 */
 }
 
 
@@ -1095,6 +1116,14 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 		goto failed;
 	}
 
+#ifdef CONFIG_P2P
+	if (ie.ip_addr_alloc) {
+		os_memcpy(sm->p2p_ip_addr, ie.ip_addr_alloc, 3 * 4);
+		wpa_hexdump(MSG_DEBUG, "P2P: IP address info",
+			    sm->p2p_ip_addr, sizeof(sm->p2p_ip_addr));
+	}
+#endif /* CONFIG_P2P */
+
 	if (wpa_supplicant_send_4_of_4(sm, sm->bssid, key, ver, key_info,
 				       NULL, 0, &sm->ptk)) {
 		goto failed;
@@ -1118,7 +1147,10 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 	}
 	wpa_sm_set_state(sm, WPA_GROUP_HANDSHAKE);
 
-	if (ie.gtk &&
+	if (sm->group_cipher == WPA_CIPHER_GTK_NOT_USED) {
+		wpa_supplicant_key_neg_complete(sm, sm->bssid,
+						key_info & WPA_KEY_INFO_SECURE);
+	} else if (ie.gtk &&
 	    wpa_supplicant_pairwise_gtk(sm, key,
 					ie.gtk, ie.gtk_len, key_info) < 0) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
@@ -1132,7 +1164,8 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 		goto failed;
 	}
 
-	wpa_sm_set_rekey_offload(sm);
+	if (ie.gtk)
+		wpa_sm_set_rekey_offload(sm);
 
 	return;
 
@@ -1353,13 +1386,14 @@ static void wpa_supplicant_process_1_of_2(struct wpa_sm *sm,
 			MAC2STR(sm->bssid), wpa_cipher_txt(sm->group_cipher));
 		wpa_sm_cancel_auth_timeout(sm);
 		wpa_sm_set_state(sm, WPA_COMPLETED);
-
-		wpa_sm_set_rekey_offload(sm);
 	} else {
 		wpa_supplicant_key_neg_complete(sm, sm->bssid,
 						key_info &
 						WPA_KEY_INFO_SECURE);
 	}
+
+	wpa_sm_set_rekey_offload(sm);
+
 	return;
 
 failed:
@@ -2086,6 +2120,10 @@ void wpa_sm_notify_assoc(struct wpa_sm *sm, const u8 *bssid)
 #ifdef CONFIG_TDLS
 	wpa_tdls_assoc(sm);
 #endif /* CONFIG_TDLS */
+
+#ifdef CONFIG_P2P
+	os_memset(sm->p2p_ip_addr, 0, sizeof(sm->p2p_ip_addr));
+#endif /* CONFIG_P2P */
 }
 
 
@@ -2098,6 +2136,7 @@ void wpa_sm_notify_assoc(struct wpa_sm *sm, const u8 *bssid)
  */
 void wpa_sm_notify_disassoc(struct wpa_sm *sm)
 {
+	peerkey_deinit(sm);
 	rsn_preauth_deinit(sm);
 	pmksa_cache_clear_current(sm);
 	if (wpa_sm_get_state(sm) == WPA_4WAY_HANDSHAKE)
@@ -2208,6 +2247,7 @@ void wpa_sm_set_config(struct wpa_sm *sm, struct rsn_supp_config *config)
 		} else
 			sm->ssid_len = 0;
 		sm->wpa_ptk_rekey = config->wpa_ptk_rekey;
+		sm->p2p = config->p2p;
 	} else {
 		sm->network_ctx = NULL;
 		sm->peerkey_enabled = 0;
@@ -2217,6 +2257,7 @@ void wpa_sm_set_config(struct wpa_sm *sm, struct rsn_supp_config *config)
 		sm->eap_conf_ctx = NULL;
 		sm->ssid_len = 0;
 		sm->wpa_ptk_rekey = 0;
+		sm->p2p = 0;
 	}
 }
 
@@ -2412,6 +2453,21 @@ int wpa_sm_get_status(struct wpa_sm *sm, char *buf, size_t buflen,
 }
 
 
+int wpa_sm_pmf_enabled(struct wpa_sm *sm)
+{
+	struct wpa_ie_data rsn;
+
+	if (sm->mfp == NO_MGMT_FRAME_PROTECTION || !sm->ap_rsn_ie)
+		return 0;
+
+	if (wpa_parse_wpa_ie_rsn(sm->ap_rsn_ie, sm->ap_rsn_ie_len, &rsn) >= 0 &&
+	    rsn.capabilities & (WPA_CAPABILITY_MFPR | WPA_CAPABILITY_MFPC))
+		return 1;
+
+	return 0;
+}
+
+
 /**
  * wpa_sm_set_assoc_wpa_ie_default - Generate own WPA/RSN IE from configuration
  * @sm: Pointer to WPA state machine data from wpa_sm_init()
@@ -2586,11 +2642,7 @@ int wpa_sm_parse_own_wpa_ie(struct wpa_sm *sm, struct wpa_ie_data *data)
 
 int wpa_sm_pmksa_cache_list(struct wpa_sm *sm, char *buf, size_t len)
 {
-#ifndef CONFIG_NO_WPA2
 	return pmksa_cache_list(sm->pmksa, buf, len);
-#else /* CONFIG_NO_WPA2 */
-	return -1;
-#endif /* CONFIG_NO_WPA2 */
 }
 
 
@@ -2621,9 +2673,7 @@ void wpa_sm_update_replay_ctr(struct wpa_sm *sm, const u8 *replay_ctr)
 
 void wpa_sm_pmksa_cache_flush(struct wpa_sm *sm, void *network_ctx)
 {
-#ifndef CONFIG_NO_WPA2
-	pmksa_cache_flush(sm->pmksa, network_ctx);
-#endif /* CONFIG_NO_WPA2 */
+	pmksa_cache_flush(sm->pmksa, network_ctx, NULL, 0);
 }
 
 
@@ -2700,3 +2750,37 @@ int wpa_wnmsleep_install_key(struct wpa_sm *sm, u8 subelem_id, u8 *buf)
 	return 0;
 }
 #endif /* CONFIG_WNM */
+
+
+#ifdef CONFIG_PEERKEY
+int wpa_sm_rx_eapol_peerkey(struct wpa_sm *sm, const u8 *src_addr,
+			    const u8 *buf, size_t len)
+{
+	struct wpa_peerkey *peerkey;
+
+	for (peerkey = sm->peerkey; peerkey; peerkey = peerkey->next) {
+		if (os_memcmp(peerkey->addr, src_addr, ETH_ALEN) == 0)
+			break;
+	}
+
+	if (!peerkey)
+		return 0;
+
+	wpa_sm_rx_eapol(sm, src_addr, buf, len);
+
+	return 1;
+}
+#endif /* CONFIG_PEERKEY */
+
+
+#ifdef CONFIG_P2P
+
+int wpa_sm_get_p2p_ip_addr(struct wpa_sm *sm, u8 *buf)
+{
+	if (sm == NULL || WPA_GET_BE32(sm->p2p_ip_addr) == 0)
+		return -1;
+	os_memcpy(buf, sm->p2p_ip_addr, 3 * 4);
+	return 0;
+}
+
+#endif /* CONFIG_P2P */

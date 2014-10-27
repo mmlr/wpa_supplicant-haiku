@@ -322,11 +322,9 @@ static void subscr_addr_add_url(struct subscription *s, const char *url,
 	url_len -= 7;
 
 	/* Make a copy of the string to allow modification during parsing */
-	scratch_mem = os_malloc(url_len + 1);
+	scratch_mem = dup_binstr(url, url_len);
 	if (scratch_mem == NULL)
 		goto fail;
-	os_memcpy(scratch_mem, url, url_len);
-	scratch_mem[url_len] = '\0';
 	wpa_printf(MSG_DEBUG, "WPS UPnP: Adding URL '%s'", scratch_mem);
 	host = scratch_mem;
 	path = os_strchr(host, '/');
@@ -434,23 +432,6 @@ static void subscr_addr_list_create(struct subscription *s,
 }
 
 
-int send_wpabuf(int fd, struct wpabuf *buf)
-{
-	wpa_printf(MSG_DEBUG, "WPS UPnP: Send %lu byte message",
-		   (unsigned long) wpabuf_len(buf));
-	errno = 0;
-	if (write(fd, wpabuf_head(buf), wpabuf_len(buf)) !=
-	    (int) wpabuf_len(buf)) {
-		wpa_printf(MSG_ERROR, "WPS UPnP: Failed to send buffer: "
-			   "errno=%d (%s)",
-			   errno, strerror(errno));
-		return -1;
-	}
-
-	return 0;
-}
-
-
 static void wpabuf_put_property(struct wpabuf *buf, const char *name,
 				const char *value)
 {
@@ -482,14 +463,14 @@ static void upnp_wps_device_send_event(struct upnp_wps_device_sm *sm)
 		"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
 		"<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\n";
 	const char *format_tail = "</e:propertyset>\n";
-	struct os_time now;
+	struct os_reltime now;
 
 	if (dl_list_empty(&sm->subscriptions)) {
 		/* optimize */
 		return;
 	}
 
-	if (os_get_time(&now) == 0) {
+	if (os_get_reltime(&now) == 0) {
 		if (now.sec != sm->last_event_sec) {
 			sm->last_event_sec = now.sec;
 			sm->num_events_in_sec = 1;
@@ -984,6 +965,7 @@ static void upnp_wps_device_stop(struct upnp_wps_device_sm *sm)
 
 	wpa_printf(MSG_DEBUG, "WPS UPnP: Stop device");
 	web_listener_stop(sm);
+	ssdp_listener_stop(sm);
 	upnp_wps_free_msearchreply(&sm->msearch_replies);
 	upnp_wps_free_subscriptions(&sm->subscriptions, NULL);
 
@@ -997,7 +979,6 @@ static void upnp_wps_device_stop(struct upnp_wps_device_sm *sm)
 	if (sm->multicast_sd >= 0)
 		close(sm->multicast_sd);
 	sm->multicast_sd = -1;
-	ssdp_listener_stop(sm);
 
 	sm->started = 0;
 }

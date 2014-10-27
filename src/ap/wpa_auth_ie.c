@@ -564,12 +564,9 @@ int wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 	}
 #endif /* CONFIG_IEEE80211R */
 
-	if (ciphers & WPA_CIPHER_CCMP)
-		sm->pairwise = WPA_CIPHER_CCMP;
-	else if (ciphers & WPA_CIPHER_GCMP)
-		sm->pairwise = WPA_CIPHER_GCMP;
-	else
-		sm->pairwise = WPA_CIPHER_TKIP;
+	sm->pairwise = wpa_pick_pairwise_cipher(ciphers, 0);
+	if (sm->pairwise < 0)
+		return WPA_INVALID_PAIRWISE;
 
 	/* TODO: clear WPA/WPA2 state if STA changes from one to another */
 	if (wpa_ie[0] == WLAN_EID_RSN)
@@ -710,6 +707,25 @@ static int wpa_parse_generic(const u8 *pos, const u8 *end,
 		return 0;
 	}
 #endif /* CONFIG_IEEE80211W */
+
+#ifdef CONFIG_P2P
+	if (pos[1] >= RSN_SELECTOR_LEN + 1 &&
+	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_IP_ADDR_REQ) {
+		ie->ip_addr_req = pos + 2 + RSN_SELECTOR_LEN;
+		wpa_hexdump(MSG_DEBUG, "WPA: IP Address Request in EAPOL-Key",
+			    ie->ip_addr_req, pos[1] - RSN_SELECTOR_LEN);
+		return 0;
+	}
+
+	if (pos[1] >= RSN_SELECTOR_LEN + 3 * 4 &&
+	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_IP_ADDR_ALLOC) {
+		ie->ip_addr_alloc = pos + 2 + RSN_SELECTOR_LEN;
+		wpa_hexdump(MSG_DEBUG,
+			    "WPA: IP Address Allocation in EAPOL-Key",
+			    ie->ip_addr_alloc, pos[1] - RSN_SELECTOR_LEN);
+		return 0;
+	}
+#endif /* CONFIG_P2P */
 
 	return 0;
 }

@@ -1,6 +1,6 @@
 /*
  * IEEE 802.11 RSN / WPA Authenticator
- * Copyright (c) 2004-2011, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2013, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -11,6 +11,7 @@
 #include "utils/common.h"
 #include "utils/eloop.h"
 #include "utils/state_machine.h"
+#include "utils/bitfield.h"
 #include "common/ieee802_11_defs.h"
 #include "crypto/aes_wrap.h"
 #include "crypto/crypto.h"
@@ -82,11 +83,14 @@ static inline int wpa_auth_get_eapol(struct wpa_authenticator *wpa_auth,
 
 
 static inline const u8 * wpa_auth_get_psk(struct wpa_authenticator *wpa_auth,
-					  const u8 *addr, const u8 *prev_psk)
+					  const u8 *addr,
+					  const u8 *p2p_dev_addr,
+					  const u8 *prev_psk)
 {
 	if (wpa_auth->cb.get_psk == NULL)
 		return NULL;
-	return wpa_auth->cb.get_psk(wpa_auth->cb.ctx, addr, prev_psk);
+	return wpa_auth->cb.get_psk(wpa_auth->cb.ctx, addr, p2p_dev_addr,
+				    prev_psk);
 }
 
 
@@ -282,8 +286,9 @@ static void wpa_auth_pmksa_free_cb(struct rsn_pmksa_cache_entry *entry,
 static int wpa_group_init_gmk_and_counter(struct wpa_authenticator *wpa_auth,
 					  struct wpa_group *group)
 {
-	u8 buf[ETH_ALEN + 8 + sizeof(group)];
+	u8 buf[ETH_ALEN + 8 + sizeof(unsigned long)];
 	u8 rkey[32];
+	unsigned long ptr;
 
 	if (random_get_bytes(group->GMK, WPA_GMK_LEN) < 0)
 		return -1;
@@ -295,7 +300,8 @@ static int wpa_group_init_gmk_and_counter(struct wpa_authenticator *wpa_auth,
 	 */
 	os_memcpy(buf, wpa_auth->addr, ETH_ALEN);
 	wpa_get_ntp_timestamp(buf + ETH_ALEN);
-	os_memcpy(buf + ETH_ALEN + 8, &group, sizeof(group));
+	ptr = (unsigned long) group;
+	os_memcpy(buf + ETH_ALEN + 8, &ptr, sizeof(ptr));
 	if (random_get_bytes(rkey, sizeof(rkey)) < 0)
 		return -1;
 
@@ -419,6 +425,17 @@ struct wpa_authenticator * wpa_init(const u8 *addr,
 				       wpa_rekey_gtk, wpa_auth, NULL);
 	}
 
+#ifdef CONFIG_P2P
+	if (WPA_GET_BE32(conf->ip_addr_start)) {
+		int count = WPA_GET_BE32(conf->ip_addr_end) -
+			WPA_GET_BE32(conf->ip_addr_start) + 1;
+		if (count > 1000)
+			count = 1000;
+		if (count > 0)
+			wpa_auth->ip_pool = bitfield_alloc(count);
+	}
+#endif /* CONFIG_P2P */
+
 	return wpa_auth;
 }
 
@@ -432,6 +449,8 @@ int wpa_init_keys(struct wpa_authenticator *wpa_auth)
 	wpa_group_sm_step(wpa_auth, group);
 	group->GInit = FALSE;
 	wpa_group_sm_step(wpa_auth, group);
+	if (group->wpa_group_state == WPA_GROUP_FATAL_FAILURE)
+		return -1;
 	return 0;
 }
 
@@ -458,6 +477,11 @@ void wpa_deinit(struct wpa_authenticator *wpa_auth)
 	wpa_ft_pmk_cache_deinit(wpa_auth->ft_pmk_cache);
 	wpa_auth->ft_pmk_cache = NULL;
 #endif /* CONFIG_IEEE80211R */
+
+#ifdef CONFIG_P2P
+	bitfield_free(wpa_auth->ip_pool);
+#endif /* CONFIG_P2P */
+
 
 	os_free(wpa_auth->wpa_ie);
 
@@ -506,14 +530,20 @@ int wpa_reconfig(struct wpa_authenticator *wpa_auth,
 
 
 struct wpa_state_machine *
-wpa_auth_sta_init(struct wpa_authenticator *wpa_auth, const u8 *addr)
+wpa_auth_sta_init(struct wpa_authenticator *wpa_auth, const u8 *addr,
+		  const u8 *p2p_dev_addr)
 {
 	struct wpa_state_machine *sm;
+
+	if (wpa_auth->group->wpa_group_state == WPA_GROUP_FATAL_FAILURE)
+		return NULL;
 
 	sm = os_zalloc(sizeof(struct wpa_state_machine));
 	if (sm == NULL)
 		return NULL;
 	os_memcpy(sm->addr, addr, ETH_ALEN);
+	if (p2p_dev_addr)
+		os_memcpy(sm->p2p_dev_addr, p2p_dev_addr, ETH_ALEN);
 
 	sm->wpa_auth = wpa_auth;
 	sm->group = wpa_auth->group;
@@ -570,6 +600,19 @@ void wpa_auth_sta_no_wpa(struct wpa_state_machine *sm)
 
 static void wpa_free_sta_sm(struct wpa_state_machine *sm)
 {
+#ifdef CONFIG_P2P
+	if (WPA_GET_BE32(sm->ip_addr)) {
+		u32 start;
+		wpa_printf(MSG_DEBUG, "P2P: Free assigned IP "
+			   "address %u.%u.%u.%u from " MACSTR,
+			   sm->ip_addr[0], sm->ip_addr[1],
+			   sm->ip_addr[2], sm->ip_addr[3],
+			   MAC2STR(sm->addr));
+		start = WPA_GET_BE32(sm->wpa_auth->conf.ip_addr_start);
+		bitfield_clear(sm->wpa_auth->ip_pool,
+			       WPA_GET_BE32(sm->ip_addr) - start);
+	}
+#endif /* CONFIG_P2P */
 	if (sm->GUpdateStationKeys) {
 		sm->group->GKeyDoneStations--;
 		sm->GUpdateStationKeys = FALSE;
@@ -987,6 +1030,26 @@ continue_processing:
 			return;
 		}
 #endif /* CONFIG_IEEE80211R */
+#ifdef CONFIG_P2P
+		if (kde.ip_addr_req && kde.ip_addr_req[0] &&
+		    wpa_auth->ip_pool && WPA_GET_BE32(sm->ip_addr) == 0) {
+			int idx;
+			wpa_printf(MSG_DEBUG, "P2P: IP address requested in "
+				   "EAPOL-Key exchange");
+			idx = bitfield_get_first_zero(wpa_auth->ip_pool);
+			if (idx >= 0) {
+				u32 start = WPA_GET_BE32(wpa_auth->conf.
+							 ip_addr_start);
+				bitfield_set(wpa_auth->ip_pool, idx);
+				WPA_PUT_BE32(sm->ip_addr, start + idx);
+				wpa_printf(MSG_DEBUG, "P2P: Assigned IP "
+					   "address %u.%u.%u.%u to " MACSTR,
+					   sm->ip_addr[0], sm->ip_addr[1],
+					   sm->ip_addr[2], sm->ip_addr[3],
+					   MAC2STR(sm->addr));
+			}
+		}
+#endif /* CONFIG_P2P */
 		break;
 	case PAIRWISE_4:
 		if (sm->wpa_ptk_state != WPA_PTK_PTKINITNEGOTIATING ||
@@ -1230,7 +1293,7 @@ void __wpa_send_eapol(struct wpa_authenticator *wpa_auth,
 	else
 		version = WPA_KEY_INFO_TYPE_HMAC_MD5_RC4;
 
-	pairwise = key_info & WPA_KEY_INFO_KEY_TYPE;
+	pairwise = !!(key_info & WPA_KEY_INFO_KEY_TYPE);
 
 	wpa_printf(MSG_DEBUG, "WPA: Send EAPOL(version=%d secure=%d mic=%d "
 		   "ack=%d install=%d pairwise=%d kde_len=%lu keyidx=%d "
@@ -1345,6 +1408,16 @@ void __wpa_send_eapol(struct wpa_authenticator *wpa_auth,
 		}
 		wpa_eapol_key_mic(sm->PTK.kck, version, (u8 *) hdr, len,
 				  key->key_mic);
+#ifdef CONFIG_TESTING_OPTIONS
+		if (!pairwise &&
+		    wpa_auth->conf.corrupt_gtk_rekey_mic_probability > 0.0d &&
+		    drand48() <
+		    wpa_auth->conf.corrupt_gtk_rekey_mic_probability) {
+			wpa_auth_logger(wpa_auth, sm->addr, LOGGER_INFO,
+					"Corrupting group EAPOL-Key Key MIC");
+			key->key_mic[0]++;
+		}
+#endif /* CONFIG_TESTING_OPTIONS */
 	}
 
 	wpa_auth_set_eapol(sm->wpa_auth, sm->addr, WPA_EAPOL_inc_EapolFramesTx,
@@ -1596,6 +1669,7 @@ SM_STATE(WPA_PTK, AUTHENTICATION2)
 	SM_ENTRY_MA(WPA_PTK, AUTHENTICATION2, wpa_ptk);
 
 	wpa_group_ensure_init(sm->wpa_auth, sm->group);
+	sm->ReAuthenticationRequest = FALSE;
 
 	/*
 	 * Definition of ANonce selection in IEEE Std 802.11i-2004 is somewhat
@@ -1609,12 +1683,11 @@ SM_STATE(WPA_PTK, AUTHENTICATION2)
 	if (random_get_bytes(sm->ANonce, WPA_NONCE_LEN)) {
 		wpa_printf(MSG_ERROR, "WPA: Failed to get random data for "
 			   "ANonce.");
-		wpa_sta_disconnect(sm->wpa_auth, sm->addr);
+		sm->Disconnect = TRUE;
 		return;
 	}
 	wpa_hexdump(MSG_DEBUG, "WPA: Assign ANonce", sm->ANonce,
 		    WPA_NONCE_LEN);
-	sm->ReAuthenticationRequest = FALSE;
 	/* IEEE 802.11i does not clear TimeoutCtr here, but this is more
 	 * logical place than INITIALIZE since AUTHENTICATION2 can be
 	 * re-entered on ReAuthenticationRequest without going through
@@ -1666,7 +1739,7 @@ SM_STATE(WPA_PTK, INITPSK)
 {
 	const u8 *psk;
 	SM_ENTRY_MA(WPA_PTK, INITPSK, wpa_ptk);
-	psk = wpa_auth_get_psk(sm->wpa_auth, sm->addr, NULL);
+	psk = wpa_auth_get_psk(sm->wpa_auth, sm->addr, sm->p2p_dev_addr, NULL);
 	if (psk) {
 		os_memcpy(sm->PMK, psk, PMK_LEN);
 #ifdef CONFIG_IEEE80211R
@@ -1759,7 +1832,8 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 	 * the packet */
 	for (;;) {
 		if (wpa_key_mgmt_wpa_psk(sm->wpa_key_mgmt)) {
-			pmk = wpa_auth_get_psk(sm->wpa_auth, sm->addr, pmk);
+			pmk = wpa_auth_get_psk(sm->wpa_auth, sm->addr,
+					       sm->p2p_dev_addr, pmk);
 			if (pmk == NULL)
 				break;
 		} else
@@ -1844,6 +1918,7 @@ static u8 * ieee80211w_kde_add(struct wpa_state_machine *sm, u8 *pos)
 {
 	struct wpa_igtk_kde igtk;
 	struct wpa_group *gsm = sm->group;
+	u8 rsc[WPA_KEY_RSC_LEN];
 
 	if (!sm->mgmt_frame_prot)
 		return pos;
@@ -1851,8 +1926,10 @@ static u8 * ieee80211w_kde_add(struct wpa_state_machine *sm, u8 *pos)
 	igtk.keyid[0] = gsm->GN_igtk;
 	igtk.keyid[1] = 0;
 	if (gsm->wpa_group_state != WPA_GROUP_SETKEYSDONE ||
-	    wpa_auth_get_seqnum(sm->wpa_auth, NULL, gsm->GN_igtk, igtk.pn) < 0)
+	    wpa_auth_get_seqnum(sm->wpa_auth, NULL, gsm->GN_igtk, rsc) < 0)
 		os_memset(igtk.pn, 0, sizeof(igtk.pn));
+	else
+		os_memcpy(igtk.pn, rsc, sizeof(igtk.pn));
 	os_memcpy(igtk.igtk, gsm->IGTK[gsm->GN_igtk - 4], WPA_IGTK_LEN);
 	if (sm->wpa_auth->conf.disable_gtk) {
 		/*
@@ -1968,6 +2045,10 @@ SM_STATE(WPA_PTK, PTKINITNEGOTIATING)
 		kde_len += 300; /* FTIE + 2 * TIE */
 	}
 #endif /* CONFIG_IEEE80211R */
+#ifdef CONFIG_P2P
+	if (WPA_GET_BE32(sm->ip_addr) > 0)
+		kde_len += 2 + RSN_SELECTOR_LEN + 3 * 4;
+#endif /* CONFIG_P2P */
 	kde = os_malloc(kde_len);
 	if (kde == NULL)
 		return;
@@ -2029,6 +2110,16 @@ SM_STATE(WPA_PTK, PTKINITNEGOTIATING)
 		pos += 4;
 	}
 #endif /* CONFIG_IEEE80211R */
+#ifdef CONFIG_P2P
+	if (WPA_GET_BE32(sm->ip_addr) > 0) {
+		u8 addr[3 * 4];
+		os_memcpy(addr, sm->ip_addr, 4);
+		os_memcpy(addr + 4, sm->wpa_auth->conf.ip_addr_mask, 4);
+		os_memcpy(addr + 8, sm->wpa_auth->conf.ip_addr_go, 4);
+		pos = wpa_add_kde(pos, WFA_KEY_DATA_IP_ADDR_ALLOC,
+				  addr, sizeof(addr), NULL, 0);
+	}
+#endif /* CONFIG_P2P */
 
 	wpa_send_eapol(sm->wpa_auth, sm,
 		       (secure ? WPA_KEY_INFO_SECURE : 0) | WPA_KEY_INFO_MIC |
@@ -2146,7 +2237,8 @@ SM_STEP(WPA_PTK)
 		}
 		break;
 	case WPA_PTK_INITPSK:
-		if (wpa_auth_get_psk(sm->wpa_auth, sm->addr, NULL))
+		if (wpa_auth_get_psk(sm->wpa_auth, sm->addr, sm->p2p_dev_addr,
+				     NULL))
 			SM_ENTER(WPA_PTK, PTKSTART);
 		else {
 			wpa_auth_logger(sm->wpa_auth, sm->addr, LOGGER_INFO,
@@ -2429,7 +2521,7 @@ static int wpa_group_update_sta(struct wpa_state_machine *sm, void *ctx)
 /* update GTK when exiting WNM-Sleep Mode */
 void wpa_wnmsleep_rekey_gtk(struct wpa_state_machine *sm)
 {
-	if (sm->is_wnmsleep)
+	if (sm == NULL || sm->is_wnmsleep)
 		return;
 
 	wpa_group_update_sta(sm, NULL);
@@ -2438,7 +2530,8 @@ void wpa_wnmsleep_rekey_gtk(struct wpa_state_machine *sm)
 
 void wpa_set_wnmsleep(struct wpa_state_machine *sm, int flag)
 {
-	sm->is_wnmsleep = !!flag;
+	if (sm)
+		sm->is_wnmsleep = !!flag;
 }
 
 
@@ -2564,6 +2657,29 @@ static int wpa_group_config_group_keys(struct wpa_authenticator *wpa_auth,
 }
 
 
+static int wpa_group_disconnect_cb(struct wpa_state_machine *sm, void *ctx)
+{
+	if (sm->group == ctx) {
+		wpa_printf(MSG_DEBUG, "WPA: Mark STA " MACSTR
+			   " for discconnection due to fatal failure",
+			   MAC2STR(sm->addr));
+		sm->Disconnect = TRUE;
+	}
+
+	return 0;
+}
+
+
+static void wpa_group_fatal_failure(struct wpa_authenticator *wpa_auth,
+				    struct wpa_group *group)
+{
+	wpa_printf(MSG_DEBUG, "WPA: group state machine entering state FATAL_FAILURE");
+	group->changed = TRUE;
+	group->wpa_group_state = WPA_GROUP_FATAL_FAILURE;
+	wpa_auth_for_each_sta(wpa_auth, wpa_group_disconnect_cb, group);
+}
+
+
 static int wpa_group_setkeysdone(struct wpa_authenticator *wpa_auth,
 				 struct wpa_group *group)
 {
@@ -2572,8 +2688,10 @@ static int wpa_group_setkeysdone(struct wpa_authenticator *wpa_auth,
 	group->changed = TRUE;
 	group->wpa_group_state = WPA_GROUP_SETKEYSDONE;
 
-	if (wpa_group_config_group_keys(wpa_auth, group) < 0)
+	if (wpa_group_config_group_keys(wpa_auth, group) < 0) {
+		wpa_group_fatal_failure(wpa_auth, group);
 		return -1;
+	}
 
 	return 0;
 }
@@ -2584,6 +2702,8 @@ static void wpa_group_sm_step(struct wpa_authenticator *wpa_auth,
 {
 	if (group->GInit) {
 		wpa_group_gtk_init(wpa_auth, group);
+	} else if (group->wpa_group_state == WPA_GROUP_FATAL_FAILURE) {
+		/* Do not allow group operations */
 	} else if (group->wpa_group_state == WPA_GROUP_GTK_INIT &&
 		   group->GTKAuthenticator) {
 		wpa_group_setkeysdone(wpa_auth, group);
@@ -2932,6 +3052,22 @@ int wpa_auth_pmksa_add_preauth(struct wpa_authenticator *wpa_auth,
 }
 
 
+void wpa_auth_pmksa_remove(struct wpa_authenticator *wpa_auth,
+			   const u8 *sta_addr)
+{
+	struct rsn_pmksa_cache_entry *pmksa;
+
+	if (wpa_auth == NULL || wpa_auth->pmksa == NULL)
+		return;
+	pmksa = pmksa_cache_auth_get(wpa_auth->pmksa, sta_addr, NULL);
+	if (pmksa) {
+		wpa_printf(MSG_DEBUG, "WPA: Remove PMKSA cache entry for "
+			   MACSTR " based on request", MAC2STR(sta_addr));
+		pmksa_cache_free_entry(wpa_auth->pmksa, pmksa);
+	}
+}
+
+
 static struct wpa_group *
 wpa_auth_add_group(struct wpa_authenticator *wpa_auth, int vlan_id)
 {
@@ -2975,6 +3111,9 @@ int wpa_auth_sta_set_vlan(struct wpa_state_machine *sm, int vlan_id)
 
 	if (sm->group == group)
 		return 0;
+
+	if (group->wpa_group_state == WPA_GROUP_FATAL_FAILURE)
+		return -1;
 
 	wpa_printf(MSG_DEBUG, "WPA: Moving STA " MACSTR " to use group state "
 		   "machine for VLAN ID %d", MAC2STR(sm->addr), vlan_id);
@@ -3020,3 +3159,22 @@ int wpa_auth_uses_sae(struct wpa_state_machine *sm)
 		return 0;
 	return wpa_key_mgmt_sae(sm->wpa_key_mgmt);
 }
+
+
+int wpa_auth_uses_ft_sae(struct wpa_state_machine *sm)
+{
+	if (sm == NULL)
+		return 0;
+	return sm->wpa_key_mgmt == WPA_KEY_MGMT_FT_SAE;
+}
+
+
+#ifdef CONFIG_P2P
+int wpa_auth_get_ip_addr(struct wpa_state_machine *sm, u8 *addr)
+{
+	if (sm == NULL || WPA_GET_BE32(sm->ip_addr) == 0)
+		return -1;
+	os_memcpy(addr, sm->ip_addr, 4);
+	return 0;
+}
+#endif /* CONFIG_P2P */

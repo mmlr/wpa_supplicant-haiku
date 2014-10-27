@@ -37,6 +37,8 @@ struct eapol_auth_config {
 	int fragment_size;
 	u16 pwd_group;
 	int pbc_in_m1;
+	const u8 *server_id;
+	size_t server_id_len;
 
 	/* Opaque context pointer to owner data for callback functions */
 	void *ctx;
@@ -81,8 +83,8 @@ eapol_auth_alloc(struct eapol_authenticator *eapol, const u8 *addr,
 		 const char *identity, const char *radius_cui);
 void eapol_auth_free(struct eapol_state_machine *sm);
 void eapol_auth_step(struct eapol_state_machine *sm);
-void eapol_auth_dump_state(FILE *f, const char *prefix,
-			   struct eapol_state_machine *sm);
+int eapol_auth_dump_state(struct eapol_state_machine *sm, char *buf,
+			  size_t buflen);
 int eapol_auth_eap_pending_cb(struct eapol_state_machine *sm, void *ctx);
 
 #endif /* EAPOL_AUTH_SM_H */

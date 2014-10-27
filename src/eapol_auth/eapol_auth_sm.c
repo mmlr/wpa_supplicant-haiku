@@ -830,6 +830,8 @@ eapol_auth_alloc(struct eapol_authenticator *eapol, const u8 *addr,
 	eap_conf.fragment_size = eapol->conf.fragment_size;
 	eap_conf.pwd_group = eapol->conf.pwd_group;
 	eap_conf.pbc_in_m1 = eapol->conf.pbc_in_m1;
+	eap_conf.server_id = eapol->conf.server_id;
+	eap_conf.server_id_len = eapol->conf.server_id_len;
 	sm->eap = eap_server_sm_init(sm, &eapol_cb, &eap_conf);
 	if (sm->eap == NULL) {
 		eapol_auth_free(sm);
@@ -1045,6 +1047,8 @@ static int eapol_auth_conf_clone(struct eapol_auth_config *dst,
 	os_free(dst->eap_req_id_text);
 	dst->pwd_group = src->pwd_group;
 	dst->pbc_in_m1 = src->pbc_in_m1;
+	dst->server_id = src->server_id;
+	dst->server_id_len = src->server_id_len;
 	if (src->eap_req_id_text) {
 		dst->eap_req_id_text = os_malloc(src->eap_req_id_text_len);
 		if (dst->eap_req_id_text == NULL)
@@ -1058,6 +1062,10 @@ static int eapol_auth_conf_clone(struct eapol_auth_config *dst,
 	}
 	if (src->pac_opaque_encr_key) {
 		dst->pac_opaque_encr_key = os_malloc(16);
+		if (dst->pac_opaque_encr_key == NULL) {
+			os_free(dst->eap_req_id_text);
+			return -1;
+		}
 		os_memcpy(dst->pac_opaque_encr_key, src->pac_opaque_encr_key,
 			  16);
 	} else
@@ -1066,6 +1074,7 @@ static int eapol_auth_conf_clone(struct eapol_auth_config *dst,
 		dst->eap_fast_a_id = os_malloc(src->eap_fast_a_id_len);
 		if (dst->eap_fast_a_id == NULL) {
 			os_free(dst->eap_req_id_text);
+			os_free(dst->pac_opaque_encr_key);
 			return -1;
 		}
 		os_memcpy(dst->eap_fast_a_id, src->eap_fast_a_id,
@@ -1077,6 +1086,7 @@ static int eapol_auth_conf_clone(struct eapol_auth_config *dst,
 		dst->eap_fast_a_id_info = os_strdup(src->eap_fast_a_id_info);
 		if (dst->eap_fast_a_id_info == NULL) {
 			os_free(dst->eap_req_id_text);
+			os_free(dst->pac_opaque_encr_key);
 			os_free(dst->eap_fast_a_id);
 			return -1;
 		}

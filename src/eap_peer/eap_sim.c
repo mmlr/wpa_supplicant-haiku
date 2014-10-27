@@ -145,6 +145,80 @@ static void eap_sim_deinit(struct eap_sm *sm, void *priv)
 }
 
 
+static int eap_sim_ext_sim_req(struct eap_sm *sm, struct eap_sim_data *data)
+{
+	char req[200], *pos, *end;
+	size_t i;
+
+	wpa_printf(MSG_DEBUG, "EAP-SIM: Use external SIM processing");
+	pos = req;
+	end = pos + sizeof(req);
+	pos += os_snprintf(pos, end - pos, "GSM-AUTH");
+	for (i = 0; i < data->num_chal; i++) {
+		pos += os_snprintf(pos, end - pos, ":");
+		pos += wpa_snprintf_hex(pos, end - pos, data->rand[i],
+					GSM_RAND_LEN);
+	}
+
+	eap_sm_request_sim(sm, req);
+	return 1;
+}
+
+
+static int eap_sim_ext_sim_result(struct eap_sm *sm, struct eap_sim_data *data,
+				  struct eap_peer_config *conf)
+{
+	char *resp, *pos;
+	size_t i;
+
+	wpa_printf(MSG_DEBUG,
+		   "EAP-SIM: Use result from external SIM processing");
+
+	resp = conf->external_sim_resp;
+	conf->external_sim_resp = NULL;
+
+	if (os_strncmp(resp, "GSM-AUTH:", 9) != 0) {
+		wpa_printf(MSG_DEBUG, "EAP-SIM: Unrecognized external SIM processing response");
+		os_free(resp);
+		return -1;
+	}
+
+	pos = resp + 9;
+	for (i = 0; i < data->num_chal; i++) {
+		wpa_hexdump(MSG_DEBUG, "EAP-SIM: RAND",
+			    data->rand[i], GSM_RAND_LEN);
+
+		if (hexstr2bin(pos, data->kc[i], EAP_SIM_KC_LEN) < 0)
+			goto invalid;
+		wpa_hexdump_key(MSG_DEBUG, "EAP-SIM: Kc",
+				data->kc[i], EAP_SIM_KC_LEN);
+		pos += EAP_SIM_KC_LEN * 2;
+		if (*pos != ':')
+			goto invalid;
+		pos++;
+
+		if (hexstr2bin(pos, data->sres[i], EAP_SIM_SRES_LEN) < 0)
+			goto invalid;
+		wpa_hexdump_key(MSG_DEBUG, "EAP-SIM: SRES",
+				data->sres[i], EAP_SIM_SRES_LEN);
+		pos += EAP_SIM_SRES_LEN * 2;
+		if (i + 1 < data->num_chal) {
+			if (*pos != ':')
+				goto invalid;
+			pos++;
+		}
+	}
+
+	os_free(resp);
+	return 0;
+
+invalid:
+	wpa_printf(MSG_DEBUG, "EAP-SIM: Invalid external SIM processing GSM-AUTH response");
+	os_free(resp);
+	return -1;
+}
+
+
 static int eap_sim_gsm_auth(struct eap_sm *sm, struct eap_sim_data *data)
 {
 	struct eap_peer_config *conf;
@@ -154,6 +228,14 @@ static int eap_sim_gsm_auth(struct eap_sm *sm, struct eap_sim_data *data)
 	conf = eap_get_config(sm);
 	if (conf == NULL)
 		return -1;
+
+	if (sm->external_sim) {
+		if (conf->external_sim_resp)
+			return eap_sim_ext_sim_result(sm, data, conf);
+		else
+			return eap_sim_ext_sim_req(sm, data);
+	}
+
 	if (conf->pcsc) {
 		if (scard_gsm_auth(sm->scard_ctx, data->rand[0],
 				   data->sres[0], data->kc[0]) ||
@@ -605,6 +687,7 @@ static struct wpabuf * eap_sim_process_challenge(struct eap_sm *sm,
 	const u8 *identity;
 	size_t identity_len;
 	struct eap_sim_attrs eattr;
+	int res;
 
 	wpa_printf(MSG_DEBUG, "EAP-SIM: subtype Challenge");
 	data->reauth = 0;
@@ -648,8 +731,13 @@ static struct wpabuf * eap_sim_process_challenge(struct eap_sm *sm,
 
 	os_memcpy(data->rand, attr->rand, attr->num_chal * GSM_RAND_LEN);
 	data->num_chal = attr->num_chal;
-		
-	if (eap_sim_gsm_auth(sm, data)) {
+
+	res = eap_sim_gsm_auth(sm, data);
+	if (res > 0) {
+		wpa_printf(MSG_DEBUG, "EAP-SIM: Wait for external SIM processing");
+		return NULL;
+	}
+	if (res) {
 		wpa_printf(MSG_WARNING, "EAP-SIM: GSM authentication failed");
 		return eap_sim_client_error(data, id,
 					    EAP_SIM_UNABLE_TO_PROCESS_PACKET);
@@ -1084,6 +1172,29 @@ static u8 * eap_sim_getKey(struct eap_sm *sm, void *priv, size_t *len)
 }
 
 
+static u8 * eap_sim_get_session_id(struct eap_sm *sm, void *priv, size_t *len)
+{
+	struct eap_sim_data *data = priv;
+	u8 *id;
+
+	if (data->state != SUCCESS)
+		return NULL;
+
+	*len = 1 + data->num_chal * GSM_RAND_LEN + EAP_SIM_NONCE_MT_LEN;
+	id = os_malloc(*len);
+	if (id == NULL)
+		return NULL;
+
+	id[0] = EAP_TYPE_SIM;
+	os_memcpy(id + 1, data->rand, data->num_chal * GSM_RAND_LEN);
+	os_memcpy(id + 1 + data->num_chal * GSM_RAND_LEN, data->nonce_mt,
+		  EAP_SIM_NONCE_MT_LEN);
+	wpa_hexdump(MSG_DEBUG, "EAP-SIM: Derived Session-Id", id, *len);
+
+	return id;
+}
+
+
 static u8 * eap_sim_get_emsk(struct eap_sm *sm, void *priv, size_t *len)
 {
 	struct eap_sim_data *data = priv;
@@ -1118,6 +1229,7 @@ int eap_peer_sim_register(void)
 	eap->process = eap_sim_process;
 	eap->isKeyAvailable = eap_sim_isKeyAvailable;
 	eap->getKey = eap_sim_getKey;
+	eap->getSessionId = eap_sim_get_session_id;
 	eap->has_reauth_data = eap_sim_has_reauth_data;
 	eap->deinit_for_reauth = eap_sim_deinit_for_reauth;
 	eap->init_for_reauth = eap_sim_init_for_reauth;
