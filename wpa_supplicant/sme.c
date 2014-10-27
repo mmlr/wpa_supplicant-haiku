@@ -360,7 +360,8 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		struct wpabuf *hs20;
 		hs20 = wpabuf_alloc(20);
 		if (hs20) {
-			wpas_hs20_add_indication(hs20);
+			int pps_mo_id = hs20_get_pps_mo_id(wpa_s, ssid);
+			wpas_hs20_add_indication(hs20, pps_mo_id);
 			os_memcpy(wpa_s->sme.assoc_req_ie +
 				  wpa_s->sme.assoc_req_ie_len,
 				  wpabuf_head(hs20), wpabuf_len(hs20));
@@ -415,6 +416,32 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 	if (old_ssid != wpa_s->current_ssid)
 		wpas_notify_network_changed(wpa_s);
 
+#ifdef CONFIG_P2P
+	/*
+	 * If multi-channel concurrency is not supported, check for any
+	 * frequency conflict. In case of any frequency conflict, remove the
+	 * least prioritized connection.
+	 */
+	if (wpa_s->num_multichan_concurrent < 2) {
+		int freq, num;
+		num = get_shared_radio_freqs(wpa_s, &freq, 1);
+		if (num > 0 && freq > 0 && freq != params.freq) {
+			wpa_printf(MSG_DEBUG,
+				   "Conflicting frequency found (%d != %d)",
+				   freq, params.freq);
+			if (wpas_p2p_handle_frequency_conflicts(wpa_s,
+								params.freq,
+								ssid) < 0) {
+				wpas_connection_failed(wpa_s, bss->bssid);
+				wpa_supplicant_mark_disassoc(wpa_s);
+				wpabuf_free(resp);
+				wpas_connect_work_done(wpa_s);
+				return;
+			}
+		}
+	}
+#endif /* CONFIG_P2P */
+
 	wpa_s->sme.auth_alg = params.auth_alg;
 	if (wpa_drv_authenticate(wpa_s, &params) < 0) {
 		wpa_msg(wpa_s, MSG_INFO, "SME: Authentication request to the "
@@ -444,6 +471,9 @@ static void sme_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	struct wpa_supplicant *wpa_s = work->wpa_s;
 
 	if (deinit) {
+		if (work->started)
+			wpa_s->connect_work = NULL;
+
 		wpas_connect_work_free(cwork);
 		return;
 	}
@@ -470,6 +500,17 @@ void sme_authenticate(struct wpa_supplicant *wpa_s,
 	if (wpa_s->connect_work) {
 		wpa_dbg(wpa_s, MSG_DEBUG, "SME: Reject sme_authenticate() call since connect_work exist");
 		return;
+	}
+
+	if (radio_work_pending(wpa_s, "sme-connect")) {
+		/*
+		 * The previous sme-connect work might no longer be valid due to
+		 * the fact that the BSS list was updated. In addition, it makes
+		 * sense to adhere to the 'newer' decision.
+		 */
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"SME: Remove previous pending sme-connect");
+		radio_remove_works(wpa_s, "sme-connect", 0);
 	}
 
 	cwork = os_zalloc(sizeof(*cwork));
@@ -702,6 +743,8 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
 	params.wpa_ie_len = wpa_s->sme.assoc_req_ie_len;
 	params.pairwise_suite = wpa_s->pairwise_cipher;
 	params.group_suite = wpa_s->group_cipher;
+	params.key_mgmt_suite = wpa_s->key_mgmt;
+	params.wpa_proto = wpa_s->wpa_proto;
 #ifdef CONFIG_HT_OVERRIDES
 	os_memset(&htcaps, 0, sizeof(htcaps));
 	os_memset(&htcaps_mask, 0, sizeof(htcaps_mask));
@@ -748,6 +791,10 @@ void sme_associate(struct wpa_supplicant *wpa_s, enum wpas_mode mode,
 		params.wpa_proto = WPA_PROTO_WPA;
 		wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, elems.wpa_ie - 2,
 					elems.wpa_ie_len + 2);
+	} else if (elems.osen) {
+		params.wpa_proto = WPA_PROTO_OSEN;
+		wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, elems.osen - 2,
+					elems.osen_len + 2);
 	} else
 		wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, NULL, 0);
 	if (wpa_s->current_ssid && wpa_s->current_ssid->p2p_group)
@@ -955,8 +1002,11 @@ static void sme_send_2040_bss_coex(struct wpa_supplicant *wpa_s,
 	struct ieee80211_2040_intol_chan_report *ic_report;
 	struct wpabuf *buf;
 
-	wpa_printf(MSG_DEBUG, "SME: Send 20/40 BSS Coexistence to " MACSTR,
-		   MAC2STR(wpa_s->bssid));
+	wpa_printf(MSG_DEBUG, "SME: Send 20/40 BSS Coexistence to " MACSTR
+		   " (num_channels=%u num_intol=%u)",
+		   MAC2STR(wpa_s->bssid), num_channels, num_intol);
+	wpa_hexdump(MSG_DEBUG, "SME: 20/40 BSS Intolerant Channels",
+		    chan_list, num_channels);
 
 	buf = wpabuf_alloc(2 + /* action.category + action_code */
 			   sizeof(struct ieee80211_2040_bss_coex_ie) +
@@ -1038,8 +1088,14 @@ int sme_proc_obss_scan(struct wpa_supplicant *wpa_s)
 
 		ie = wpa_bss_get_ie(bss, WLAN_EID_HT_CAP);
 		ht_cap = (ie && (ie[1] == 26)) ? WPA_GET_LE16(ie + 2) : 0;
+		wpa_printf(MSG_DEBUG, "SME OBSS scan BSS " MACSTR
+			   " freq=%u chan=%u ht_cap=0x%x",
+			   MAC2STR(bss->bssid), bss->freq, channel, ht_cap);
 
 		if (!ht_cap || (ht_cap & HT_CAP_INFO_40MHZ_INTOLERANT)) {
+			if (ht_cap & HT_CAP_INFO_40MHZ_INTOLERANT)
+				num_intol++;
+
 			/* Check whether the channel is already considered */
 			for (i = 0; i < num_channels; i++) {
 				if (channel == chan_list[i])
@@ -1047,9 +1103,6 @@ int sme_proc_obss_scan(struct wpa_supplicant *wpa_s)
 			}
 			if (i != num_channels)
 				continue;
-
-			if (ht_cap & HT_CAP_INFO_40MHZ_INTOLERANT)
-				num_intol++;
 
 			chan_list[num_channels++] = channel;
 		}

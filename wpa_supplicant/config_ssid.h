@@ -30,9 +30,11 @@
 #define DEFAULT_DISABLE_HT 0
 #define DEFAULT_DISABLE_HT40 0
 #define DEFAULT_DISABLE_SGI 0
+#define DEFAULT_DISABLE_LDPC 0
 #define DEFAULT_DISABLE_MAX_AMSDU -1 /* no change */
 #define DEFAULT_AMPDU_FACTOR -1 /* no change */
 #define DEFAULT_AMPDU_DENSITY -1 /* no change */
+#define DEFAULT_USER_SELECTED_SIM 1
 
 struct psk_list_entry {
 	struct dl_list list;
@@ -525,6 +527,19 @@ struct wpa_ssid {
 	int disable_sgi;
 
 	/**
+	 * disable_ldpc - Disable LDPC for this network
+	 *
+	 * By default, use it if it is available, but this can be configured
+	 * to 1 to have it disabled.
+	 */
+	int disable_ldpc;
+
+	/**
+	 * ht40_intolerant - Indicate 40 MHz intolerant for this network
+	 */
+	int ht40_intolerant;
+
+	/**
 	 * disable_max_amsdu - Disable MAX A-MSDU
 	 *
 	 * A-MDSU will be 3839 bytes when disabled, or 7935
@@ -621,6 +636,17 @@ struct wpa_ssid {
 	 * dereferences since it may not be updated in all cases.
 	 */
 	void *parent_cred;
+
+#ifdef CONFIG_MACSEC
+	/**
+	 * macsec_policy - Determines the policy for MACsec secure session
+	 *
+	 * 0: MACsec not in use (default)
+	 * 1: MACsec enabled - Should secure, accept key server's advice to
+	 *    determine whether to use a secure session or not.
+	 */
+	int macsec_policy;
+#endif /* CONFIG_MACSEC */
 };
 
 #endif /* CONFIG_SSID_H */

@@ -148,7 +148,13 @@ static void wpas_trigger_scan_cb(struct wpa_radio_work *work, int deinit)
 	int ret;
 
 	if (deinit) {
-		wpa_scan_free_params(params);
+		if (!work->started) {
+			wpa_scan_free_params(params);
+			return;
+		}
+		wpa_supplicant_notify_scanning(wpa_s, 0);
+		wpas_notify_scan_done(wpa_s, 0);
+		wpa_s->scan_work = NULL;
 		return;
 	}
 
@@ -320,6 +326,32 @@ static void wpa_supplicant_optimize_freqs(
 		}
 		wpa_s->p2p_in_provisioning++;
 	}
+
+	if (params->freqs == NULL && wpa_s->p2p_in_invitation) {
+		/*
+		 * Optimize scan based on GO information during persistent
+		 * group reinvocation
+		 */
+		if (wpa_s->p2p_in_invitation < 5 &&
+		    wpa_s->p2p_invite_go_freq > 0) {
+			wpa_dbg(wpa_s, MSG_DEBUG, "P2P: Scan only GO preferred frequency %d MHz during invitation",
+				wpa_s->p2p_invite_go_freq);
+			params->freqs = os_zalloc(2 * sizeof(int));
+			if (params->freqs)
+				params->freqs[0] = wpa_s->p2p_invite_go_freq;
+		}
+		wpa_s->p2p_in_invitation++;
+		if (wpa_s->p2p_in_invitation > 20) {
+			/*
+			 * This should not really happen since the variable is
+			 * cleared on group removal, but if it does happen, make
+			 * sure we do not get stuck in special invitation scan
+			 * mode.
+			 */
+			wpa_dbg(wpa_s, MSG_DEBUG, "P2P: Clear p2p_in_invitation");
+			wpa_s->p2p_in_invitation = 0;
+		}
+	}
 #endif /* CONFIG_P2P */
 
 #ifdef CONFIG_WPS
@@ -359,11 +391,17 @@ static void wpas_add_interworking_elements(struct wpa_supplicant *wpa_s,
 		return;
 
 	wpabuf_put_u8(buf, WLAN_EID_EXT_CAPAB);
-	wpabuf_put_u8(buf, 4);
+	wpabuf_put_u8(buf, 6);
 	wpabuf_put_u8(buf, 0x00);
 	wpabuf_put_u8(buf, 0x00);
 	wpabuf_put_u8(buf, 0x00);
 	wpabuf_put_u8(buf, 0x80); /* Bit 31 - Interworking */
+	wpabuf_put_u8(buf, 0x00);
+#ifdef CONFIG_HS20
+	wpabuf_put_u8(buf, 0x40); /* Bit 46 - WNM-Notification */
+#else /* CONFIG_HS20 */
+	wpabuf_put_u8(buf, 0x00);
+#endif /* CONFIG_HS20 */
 
 	wpabuf_put_u8(buf, WLAN_EID_INTERWORKING);
 	wpabuf_put_u8(buf, is_zero_ether_addr(wpa_s->conf->hessid) ? 1 :
@@ -419,7 +457,7 @@ static struct wpabuf * wpa_supplicant_extra_ies(struct wpa_supplicant *wpa_s)
 
 #ifdef CONFIG_HS20
 	if (wpa_s->conf->hs20 && wpabuf_resize(&extra_ie, 7) == 0)
-		wpas_hs20_add_indication(extra_ie);
+		wpas_hs20_add_indication(extra_ie, -1);
 #endif /* CONFIG_HS20 */
 
 	return extra_ie;
@@ -627,6 +665,19 @@ static void wpa_supplicant_scan(void *eloop_ctx, void *timeout_ctx)
 		params.num_ssids = 1;
 		goto ssid_list_set;
 	}
+
+	if (wpa_s->p2p_in_invitation) {
+		if (wpa_s->current_ssid) {
+			wpa_printf(MSG_DEBUG, "P2P: Use specific SSID for scan during invitation");
+			params.ssids[0].ssid = wpa_s->current_ssid->ssid;
+			params.ssids[0].ssid_len =
+				wpa_s->current_ssid->ssid_len;
+			params.num_ssids = 1;
+		} else {
+			wpa_printf(MSG_DEBUG, "P2P: No specific SSID known for scan during invitation");
+		}
+		goto ssid_list_set;
+	}
 #endif /* CONFIG_P2P */
 
 	/* Find the starting point from which to continue scanning */
@@ -653,6 +704,36 @@ static void wpa_supplicant_scan(void *eloop_ctx, void *timeout_ctx)
 		 * wildcard SSID.
 		 */
 		ssid = NULL;
+	} else if (wpa_s->reattach && wpa_s->current_ssid != NULL) {
+		/*
+		 * Perform single-channel single-SSID scan for
+		 * reassociate-to-same-BSS operation.
+		 */
+		/* Setup SSID */
+		ssid = wpa_s->current_ssid;
+		wpa_hexdump_ascii(MSG_DEBUG, "Scan SSID",
+				  ssid->ssid, ssid->ssid_len);
+		params.ssids[0].ssid = ssid->ssid;
+		params.ssids[0].ssid_len = ssid->ssid_len;
+		params.num_ssids = 1;
+
+		/*
+		 * Allocate memory for frequency array, allocate one extra
+		 * slot for the zero-terminator.
+		 */
+		params.freqs = os_malloc(sizeof(int) * 2);
+		if (params.freqs == NULL) {
+			wpa_dbg(wpa_s, MSG_ERROR, "Memory allocation failed");
+			return;
+		}
+		params.freqs[0] = wpa_s->assoc_freq;
+		params.freqs[1] = 0;
+
+		/*
+		 * Reset the reattach flag so that we fall back to full scan if
+		 * this scan fails.
+		 */
+		wpa_s->reattach = 0;
 	} else {
 		struct wpa_ssid *start = ssid, *tssid;
 		int freqs_set = 0;
@@ -789,7 +870,7 @@ ssid_list_set:
 	}
 
 #ifdef CONFIG_P2P
-	if (wpa_s->p2p_in_provisioning ||
+	if (wpa_s->p2p_in_provisioning || wpa_s->p2p_in_invitation ||
 	    (wpa_s->show_group_started && wpa_s->go_params)) {
 		/*
 		 * The interface may not yet be in P2P mode, so we have to
@@ -1800,4 +1881,116 @@ void wpa_scan_free_params(struct wpa_driver_scan_params *params)
 	os_free(params->freqs);
 	os_free(params->filter_ssids);
 	os_free(params);
+}
+
+
+int wpas_start_pno(struct wpa_supplicant *wpa_s)
+{
+	int ret, interval;
+	size_t i, num_ssid;
+	struct wpa_ssid *ssid;
+	struct wpa_driver_scan_params params;
+
+	if (!wpa_s->sched_scan_supported)
+		return -1;
+
+	if (wpa_s->pno || wpa_s->pno_sched_pending)
+		return 0;
+
+	if ((wpa_s->wpa_state > WPA_SCANNING) &&
+	    (wpa_s->wpa_state <= WPA_COMPLETED)) {
+		wpa_printf(MSG_ERROR, "PNO: In assoc process");
+		return -EAGAIN;
+	}
+
+	if (wpa_s->wpa_state == WPA_SCANNING) {
+		wpa_supplicant_cancel_scan(wpa_s);
+		if (wpa_s->sched_scanning) {
+			wpa_printf(MSG_DEBUG, "Schedule PNO on completion of "
+				   "ongoing sched scan");
+			wpa_supplicant_cancel_sched_scan(wpa_s);
+			wpa_s->pno_sched_pending = 1;
+			return 0;
+		}
+	}
+
+	os_memset(&params, 0, sizeof(params));
+
+	num_ssid = 0;
+	ssid = wpa_s->conf->ssid;
+	while (ssid) {
+		if (!wpas_network_disabled(wpa_s, ssid))
+			num_ssid++;
+		ssid = ssid->next;
+	}
+	if (num_ssid > WPAS_MAX_SCAN_SSIDS) {
+		wpa_printf(MSG_DEBUG, "PNO: Use only the first %u SSIDs from "
+			   "%u", WPAS_MAX_SCAN_SSIDS, (unsigned int) num_ssid);
+		num_ssid = WPAS_MAX_SCAN_SSIDS;
+	}
+
+	if (num_ssid == 0) {
+		wpa_printf(MSG_DEBUG, "PNO: No configured SSIDs");
+		return -1;
+	}
+
+	params.filter_ssids = os_malloc(sizeof(struct wpa_driver_scan_filter) *
+					num_ssid);
+	if (params.filter_ssids == NULL)
+		return -1;
+	i = 0;
+	ssid = wpa_s->conf->ssid;
+	while (ssid) {
+		if (!wpas_network_disabled(wpa_s, ssid)) {
+			params.ssids[i].ssid = ssid->ssid;
+			params.ssids[i].ssid_len = ssid->ssid_len;
+			params.num_ssids++;
+			os_memcpy(params.filter_ssids[i].ssid, ssid->ssid,
+				  ssid->ssid_len);
+			params.filter_ssids[i].ssid_len = ssid->ssid_len;
+			params.num_filter_ssids++;
+			i++;
+			if (i == num_ssid)
+				break;
+		}
+		ssid = ssid->next;
+	}
+
+	if (wpa_s->conf->filter_rssi)
+		params.filter_rssi = wpa_s->conf->filter_rssi;
+
+	interval = wpa_s->conf->sched_scan_interval ?
+		wpa_s->conf->sched_scan_interval : 10;
+
+	if (params.freqs == NULL && wpa_s->manual_sched_scan_freqs) {
+		wpa_dbg(wpa_s, MSG_DEBUG, "Limit sched scan to specified channels");
+		params.freqs = wpa_s->manual_sched_scan_freqs;
+	}
+
+	ret = wpa_supplicant_start_sched_scan(wpa_s, &params, interval);
+	os_free(params.filter_ssids);
+	if (ret == 0)
+		wpa_s->pno = 1;
+	else
+		wpa_msg(wpa_s, MSG_ERROR, "Failed to schedule PNO");
+	return ret;
+}
+
+
+int wpas_stop_pno(struct wpa_supplicant *wpa_s)
+{
+	int ret = 0;
+
+	if (!wpa_s->pno)
+		return 0;
+
+	ret = wpa_supplicant_stop_sched_scan(wpa_s);
+
+	wpa_s->pno = 0;
+	wpa_s->pno_sched_pending = 0;
+
+	if (wpa_s->wpa_state == WPA_SCANNING)
+		wpa_supplicant_req_scan(wpa_s, 0, 0);
+
+	return ret;
 }

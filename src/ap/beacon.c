@@ -27,6 +27,7 @@
 #include "ap_drv_ops.h"
 #include "beacon.h"
 #include "hs20.h"
+#include "dfs.h"
 
 
 #ifdef NEED_AP_MLME
@@ -99,6 +100,70 @@ static u8 * hostapd_eid_erp_info(struct hostapd_data *hapd, u8 *eid)
 	*eid++ = ieee802_11_erp_info(hapd);
 
 	return eid;
+}
+
+
+static u8 * hostapd_eid_pwr_constraint(struct hostapd_data *hapd, u8 *eid)
+{
+	u8 *pos = eid;
+	u8 local_pwr_constraint = 0;
+	int dfs;
+
+	if (hapd->iface->current_mode == NULL ||
+	    hapd->iface->current_mode->mode != HOSTAPD_MODE_IEEE80211A)
+		return eid;
+
+	/*
+	 * There is no DFS support and power constraint was not directly
+	 * requested by config option.
+	 */
+	if (!hapd->iconf->ieee80211h &&
+	    hapd->iconf->local_pwr_constraint == -1)
+		return eid;
+
+	/* Check if DFS is required by regulatory. */
+	dfs = hostapd_is_dfs_required(hapd->iface);
+	if (dfs < 0) {
+		wpa_printf(MSG_WARNING, "Failed to check if DFS is required; ret=%d",
+			   dfs);
+		dfs = 0;
+	}
+
+	if (dfs == 0 && hapd->iconf->local_pwr_constraint == -1)
+		return eid;
+
+	/*
+	 * ieee80211h (DFS) is enabled so Power Constraint element shall
+	 * be added when running on DFS channel whenever local_pwr_constraint
+	 * is configured or not. In order to meet regulations when TPC is not
+	 * implemented using a transmit power that is below the legal maximum
+	 * (including any mitigation factor) should help. In this case,
+	 * indicate 3 dB below maximum allowed transmit power.
+	 */
+	if (hapd->iconf->local_pwr_constraint == -1)
+		local_pwr_constraint = 3;
+
+	/*
+	 * A STA that is not an AP shall use a transmit power less than or
+	 * equal to the local maximum transmit power level for the channel.
+	 * The local maximum transmit power can be calculated from the formula:
+	 * local max TX pwr = max TX pwr - local pwr constraint
+	 * Where max TX pwr is maximum transmit power level specified for
+	 * channel in Country element and local pwr constraint is specified
+	 * for channel in this Power Constraint element.
+	 */
+
+	/* Element ID */
+	*pos++ = WLAN_EID_PWR_CONSTRAINT;
+	/* Length */
+	*pos++ = 1;
+	/* Local Power Constraint */
+	if (local_pwr_constraint)
+		*pos++ = local_pwr_constraint;
+	else
+		*pos++ = hapd->iconf->local_pwr_constraint;
+
+	return pos;
 }
 
 
@@ -315,6 +380,9 @@ static u8 * hostapd_gen_probe_resp(struct hostapd_data *hapd,
 
 	pos = hostapd_eid_country(hapd, pos, epos - pos);
 
+	/* Power Constraint element */
+	pos = hostapd_eid_pwr_constraint(hapd, pos);
+
 	/* ERP Information element */
 	pos = hostapd_eid_erp_info(hapd, pos);
 
@@ -374,6 +442,7 @@ static u8 * hostapd_gen_probe_resp(struct hostapd_data *hapd,
 
 #ifdef CONFIG_HS20
 	pos = hostapd_eid_hs20_indication(hapd, pos);
+	pos = hostapd_eid_osen(hapd, pos);
 #endif /* CONFIG_HS20 */
 
 	if (hapd->conf->vendor_elements) {
@@ -520,12 +589,10 @@ void handle_probe_req(struct hostapd_data *hapd,
 			sta->ssid_probe = &hapd->conf->ssid;
 	} else {
 		if (!(mgmt->da[0] & 0x01)) {
-			char ssid_txt[33];
-			ieee802_11_print_ssid(ssid_txt, elems.ssid,
-					      elems.ssid_len);
 			wpa_printf(MSG_MSGDUMP, "Probe Request from " MACSTR
 				   " for foreign SSID '%s' (DA " MACSTR ")%s",
-				   MAC2STR(mgmt->sa), ssid_txt,
+				   MAC2STR(mgmt->sa),
+				   wpa_ssid_txt(elems.ssid, elems.ssid_len),
 				   MAC2STR(mgmt->da),
 				   elems.ssid_list ? " (SSID list)" : "");
 		}
@@ -533,7 +600,8 @@ void handle_probe_req(struct hostapd_data *hapd,
 	}
 
 #ifdef CONFIG_INTERWORKING
-	if (elems.interworking && elems.interworking_len >= 1) {
+	if (hapd->conf->interworking &&
+	    elems.interworking && elems.interworking_len >= 1) {
 		u8 ant = elems.interworking[0] & 0x0f;
 		if (ant != INTERWORKING_ANT_WILDCARD &&
 		    ant != hapd->conf->access_network_type) {
@@ -544,7 +612,7 @@ void handle_probe_req(struct hostapd_data *hapd,
 		}
 	}
 
-	if (elems.interworking &&
+	if (hapd->conf->interworking && elems.interworking &&
 	    (elems.interworking_len == 7 || elems.interworking_len == 9)) {
 		const u8 *hessid;
 		if (elems.interworking_len == 7)
@@ -577,7 +645,7 @@ void handle_probe_req(struct hostapd_data *hapd,
 	 * with AP configuration */
 
 #ifdef CONFIG_TESTING_OPTIONS
-	if (hapd->iconf->ignore_probe_probability > 0.0d &&
+	if (hapd->iconf->ignore_probe_probability > 0.0 &&
 	    drand48() < hapd->iconf->ignore_probe_probability) {
 		wpa_printf(MSG_INFO,
 			   "TESTING: ignoring probe request from " MACSTR,
@@ -723,6 +791,9 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 	tailpos = hostapd_eid_country(hapd, tailpos,
 				      tail + BEACON_TAIL_BUF_SIZE - tailpos);
 
+	/* Power Constraint element */
+	tailpos = hostapd_eid_pwr_constraint(hapd, tailpos);
+
 	/* ERP Information element */
 	tailpos = hostapd_eid_erp_info(hapd, tailpos);
 
@@ -785,6 +856,7 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 
 #ifdef CONFIG_HS20
 	tailpos = hostapd_eid_hs20_indication(hapd, tailpos);
+	tailpos = hostapd_eid_osen(hapd, tailpos);
 #endif /* CONFIG_HS20 */
 
 	if (hapd->conf->vendor_elements) {
@@ -810,8 +882,8 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 	params->basic_rates = hapd->iface->basic_rates;
 	params->ssid = hapd->conf->ssid.ssid;
 	params->ssid_len = hapd->conf->ssid.ssid_len;
-	params->pairwise_ciphers = hapd->conf->rsn_pairwise ?
-		hapd->conf->rsn_pairwise : hapd->conf->wpa_pairwise;
+	params->pairwise_ciphers = hapd->conf->wpa_pairwise |
+		hapd->conf->rsn_pairwise;
 	params->group_cipher = hapd->conf->wpa_group;
 	params->key_mgmt_suites = hapd->conf->wpa_key_mgmt;
 	params->auth_algs = hapd->conf->auth_algs;
@@ -856,6 +928,10 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 	params->ap_max_inactivity = hapd->conf->ap_max_inactivity;
 #ifdef CONFIG_HS20
 	params->disable_dgaf = hapd->conf->disable_dgaf;
+	if (hapd->conf->osen) {
+		params->privacy = 1;
+		params->osen = 1;
+	}
 #endif /* CONFIG_HS20 */
 	return 0;
 }
@@ -875,6 +951,9 @@ void ieee802_11_free_ap_params(struct wpa_driver_ap_params *params)
 int ieee802_11_set_beacon(struct hostapd_data *hapd)
 {
 	struct wpa_driver_ap_params params;
+	struct hostapd_freq_params freq;
+	struct hostapd_iface *iface = hapd->iface;
+	struct hostapd_config *iconf = iface->conf;
 	struct wpabuf *beacon, *proberesp, *assocresp;
 	int res, ret = -1;
 
@@ -895,6 +974,17 @@ int ieee802_11_set_beacon(struct hostapd_data *hapd)
 	params.beacon_ies = beacon;
 	params.proberesp_ies = proberesp;
 	params.assocresp_ies = assocresp;
+
+	if (iface->current_mode &&
+	    hostapd_set_freq_params(&freq, iconf->hw_mode, iface->freq,
+				    iconf->channel, iconf->ieee80211n,
+				    iconf->ieee80211ac,
+				    iconf->secondary_channel,
+				    iconf->vht_oper_chwidth,
+				    iconf->vht_oper_centr_freq_seg0_idx,
+				    iconf->vht_oper_centr_freq_seg1_idx,
+				    iface->current_mode->vht_capab) == 0)
+		params.freq = &freq;
 
 	res = hostapd_drv_set_ap(hapd, &params);
 	hostapd_free_ap_extra_ies(hapd, beacon, proberesp, assocresp);

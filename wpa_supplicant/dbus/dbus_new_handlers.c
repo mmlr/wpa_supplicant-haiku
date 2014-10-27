@@ -116,6 +116,27 @@ DBusMessage * wpas_dbus_error_invalid_args(DBusMessage *message,
 }
 
 
+/**
+ * wpas_dbus_error_scan_error - Return a new ScanError error message
+ * @message: Pointer to incoming dbus message this error refers to
+ * @error: Optional string to be used as the error message
+ * Returns: a dbus error message
+ *
+ * Convenience function to create and return a scan error
+ */
+DBusMessage * wpas_dbus_error_scan_error(DBusMessage *message,
+					 const char *error)
+{
+	DBusMessage *reply;
+
+	reply = dbus_message_new_error(message,
+				       WPAS_DBUS_ERROR_IFACE_SCAN_ERROR,
+				       error);
+
+	return reply;
+}
+
+
 static const char *dont_quote[] = {
 	"key_mgmt", "proto", "pairwise", "auth_alg", "group", "eap",
 	"opensc_engine_path", "pkcs11_engine_path", "pkcs11_module_path",
@@ -1330,7 +1351,10 @@ DBusMessage * wpas_dbus_handler_scan(DBusMessage *message,
 				"passive scan");
 			goto out;
 		} else if (params.freqs && params.freqs[0]) {
-			wpa_supplicant_trigger_scan(wpa_s, &params);
+			if (wpa_supplicant_trigger_scan(wpa_s, &params)) {
+				reply = wpas_dbus_error_scan_error(
+					message, "Scan request rejected");
+			}
 		} else {
 			wpa_s->scan_req = MANUAL_SCAN_REQ;
 			wpa_supplicant_req_scan(wpa_s, 0, 0);
@@ -1343,7 +1367,10 @@ DBusMessage * wpas_dbus_handler_scan(DBusMessage *message,
 #ifdef CONFIG_AUTOSCAN
 		autoscan_deinit(wpa_s);
 #endif /* CONFIG_AUTOSCAN */
-		wpa_supplicant_trigger_scan(wpa_s, &params);
+		if (wpa_supplicant_trigger_scan(wpa_s, &params)) {
+			reply = wpas_dbus_error_scan_error(
+				message, "Scan request rejected");
+		}
 	} else {
 		wpa_printf(MSG_DEBUG, "wpas_dbus_handler_scan[dbus]: "
 			   "Unknown scan type: %s", type);
@@ -1465,10 +1492,10 @@ err:
 
 
 /**
- * wpas_dbus_handler_reassociate - Reassociate to current AP
+ * wpas_dbus_handler_reassociate - Reassociate
  * @message: Pointer to incoming dbus message
  * @wpa_s: wpa_supplicant structure for a network interface
- * Returns: NotConnected DBus error message if not connected
+ * Returns: InterfaceDisabled DBus error message if disabled
  * or NULL otherwise.
  *
  * Handler function for "Reassociate" method call of network interface.
@@ -1476,7 +1503,30 @@ err:
 DBusMessage * wpas_dbus_handler_reassociate(DBusMessage *message,
 					    struct wpa_supplicant *wpa_s)
 {
+	if (wpa_s->wpa_state != WPA_INTERFACE_DISABLED) {
+		wpas_request_connection(wpa_s);
+		return NULL;
+	}
+
+	return dbus_message_new_error(message, WPAS_DBUS_ERROR_IFACE_DISABLED,
+				      "This interface is disabled");
+}
+
+
+/**
+ * wpas_dbus_handler_reattach - Reattach to current AP
+ * @message: Pointer to incoming dbus message
+ * @wpa_s: wpa_supplicant structure for a network interface
+ * Returns: NotConnected DBus error message if not connected
+ * or NULL otherwise.
+ *
+ * Handler function for "Reattach" method call of network interface.
+ */
+DBusMessage * wpas_dbus_handler_reattach(DBusMessage *message,
+					 struct wpa_supplicant *wpa_s)
+{
 	if (wpa_s->current_ssid != NULL) {
+		wpa_s->reattach = 1;
 		wpas_request_connection(wpa_s);
 		return NULL;
 	}
@@ -1533,16 +1583,6 @@ DBusMessage * wpas_dbus_handler_remove_network(DBusMessage *message,
 
 	wpas_notify_network_removed(wpa_s, ssid);
 
-	if (wpa_config_remove_network(wpa_s->conf, id) < 0) {
-		wpa_printf(MSG_ERROR,
-			   "wpas_dbus_handler_remove_network[dbus]: "
-			   "error occurred when removing network %d", id);
-		reply = wpas_dbus_error_unknown_error(
-			message, "error removing the specified network on "
-			"this interface.");
-		goto out;
-	}
-
 	if (ssid == wpa_s->current_ssid)
 		wpa_supplicant_deauthenticate(wpa_s,
 					      WLAN_REASON_DEAUTH_LEAVING);
@@ -1553,6 +1593,15 @@ DBusMessage * wpas_dbus_handler_remove_network(DBusMessage *message,
 		wpa_supplicant_req_scan(wpa_s, 0, 0);
 	}
 
+	if (wpa_config_remove_network(wpa_s->conf, id) < 0) {
+		wpa_printf(MSG_ERROR,
+			   "wpas_dbus_handler_remove_network[dbus]: "
+			   "error occurred when removing network %d", id);
+		reply = wpas_dbus_error_unknown_error(
+			message, "error removing the specified network on "
+			"this interface.");
+		goto out;
+	}
 
 out:
 	os_free(iface);
@@ -1995,25 +2044,29 @@ DBusMessage * wpas_dbus_handler_eap_logon(DBusMessage *message,
 
 #ifdef CONFIG_TDLS
 
-static DBusMessage * get_peer_hwaddr_helper(DBusMessage *message,
-					    const char *func_name,
-					    u8 *peer_address)
+static int get_peer_hwaddr_helper(DBusMessage *message, const char *func_name,
+				  u8 *peer_address, DBusMessage **error)
 {
 	const char *peer_string;
 
+	*error = NULL;
+
 	if (!dbus_message_get_args(message, NULL,
 				   DBUS_TYPE_STRING, &peer_string,
-				   DBUS_TYPE_INVALID))
-		return wpas_dbus_error_invalid_args(message, NULL);
+				   DBUS_TYPE_INVALID)) {
+		*error = wpas_dbus_error_invalid_args(message, NULL);
+		return -1;
+	}
 
 	if (hwaddr_aton(peer_string, peer_address)) {
 		wpa_printf(MSG_DEBUG, "%s: invalid address '%s'",
 			   func_name, peer_string);
-		return wpas_dbus_error_invalid_args(
+		*error = wpas_dbus_error_invalid_args(
 			message, "Invalid hardware address format");
+		return -1;
 	}
 
-	return NULL;
+	return 0;
 }
 
 
@@ -2032,8 +2085,7 @@ DBusMessage * wpas_dbus_handler_tdls_discover(DBusMessage *message,
 	DBusMessage *error_reply;
 	int ret;
 
-	error_reply = get_peer_hwaddr_helper(message, __func__, peer);
-	if (error_reply)
+	if (get_peer_hwaddr_helper(message, __func__, peer, &error_reply) < 0)
 		return error_reply;
 
 	wpa_printf(MSG_DEBUG, "DBUS TDLS_DISCOVER " MACSTR, MAC2STR(peer));
@@ -2067,8 +2119,7 @@ DBusMessage * wpas_dbus_handler_tdls_setup(DBusMessage *message,
 	DBusMessage *error_reply;
 	int ret;
 
-	error_reply = get_peer_hwaddr_helper(message, __func__, peer);
-	if (error_reply)
+	if (get_peer_hwaddr_helper(message, __func__, peer, &error_reply) < 0)
 		return error_reply;
 
 	wpa_printf(MSG_DEBUG, "DBUS TDLS_SETUP " MACSTR, MAC2STR(peer));
@@ -2103,8 +2154,7 @@ DBusMessage * wpas_dbus_handler_tdls_status(DBusMessage *message,
 	DBusMessage *reply;
 	const char *tdls_status;
 
-	reply = get_peer_hwaddr_helper(message, __func__, peer);
-	if (reply)
+	if (get_peer_hwaddr_helper(message, __func__, peer, &reply) < 0)
 		return reply;
 
 	wpa_printf(MSG_DEBUG, "DBUS TDLS_STATUS " MACSTR, MAC2STR(peer));
@@ -2133,8 +2183,7 @@ DBusMessage * wpas_dbus_handler_tdls_teardown(DBusMessage *message,
 	DBusMessage *error_reply;
 	int ret;
 
-	error_reply = get_peer_hwaddr_helper(message, __func__, peer);
-	if (error_reply)
+	if (get_peer_hwaddr_helper(message, __func__, peer, &error_reply) < 0)
 		return error_reply;
 
 	wpa_printf(MSG_DEBUG, "DBUS TDLS_TEARDOWN " MACSTR, MAC2STR(peer));
@@ -3497,11 +3546,22 @@ dbus_bool_t wpas_dbus_getter_bss_mode(DBusMessageIter *iter, DBusError *error,
 	res = get_bss_helper(args, error, __func__);
 	if (!res)
 		return FALSE;
-
-	if (res->caps & IEEE80211_CAP_IBSS)
-		mode = "ad-hoc";
-	else
-		mode = "infrastructure";
+	if (bss_is_dmg(res)) {
+		switch (res->caps & IEEE80211_CAP_DMG_MASK) {
+		case IEEE80211_CAP_DMG_PBSS:
+		case IEEE80211_CAP_DMG_IBSS:
+			mode = "ad-hoc";
+			break;
+		case IEEE80211_CAP_DMG_AP:
+			mode = "infrastructure";
+			break;
+		}
+	} else {
+		if (res->caps & IEEE80211_CAP_IBSS)
+			mode = "ad-hoc";
+		else
+			mode = "infrastructure";
+	}
 
 	return wpas_dbus_simple_property_getter(iter, DBUS_TYPE_STRING,
 						&mode, error);

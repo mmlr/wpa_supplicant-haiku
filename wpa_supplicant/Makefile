@@ -106,10 +106,10 @@ OBJS_priv += ../src/utils/trace.o
 LDFLAGS += -rdynamic
 CFLAGS += -funwind-tables
 ifdef CONFIG_WPA_TRACE_BFD
-CFLAGS += -DWPA_TRACE_BFD
-LIBS += -lbfd
-LIBS_p += -lbfd
-LIBS_c += -lbfd
+CFLAGS += -DPACKAGE="wpa_supplicant" -DWPA_TRACE_BFD
+LIBS += -lbfd -ldl -liberty -lz
+LIBS_p += -lbfd -ldl -liberty -lz
+LIBS_c += -lbfd -ldl -liberty -lz
 endif
 endif
 
@@ -130,6 +130,9 @@ ifdef CONFIG_ELOOP_POLL
 CFLAGS += -DCONFIG_ELOOP_POLL
 endif
 
+ifdef CONFIG_ELOOP_EPOLL
+CFLAGS += -DCONFIG_ELOOP_EPOLL
+endif
 
 ifdef CONFIG_EAPOL_TEST
 CFLAGS += -Werror -DEAPOL_TEST
@@ -278,6 +281,7 @@ ifdef CONFIG_HS20
 OBJS += hs20_supplicant.o
 CFLAGS += -DCONFIG_HS20
 CONFIG_INTERWORKING=y
+NEED_AES_OMAC1=y
 endif
 
 ifdef CONFIG_INTERWORKING
@@ -506,7 +510,7 @@ endif
 ifdef CONFIG_EAP_PROXY
 CFLAGS += -DCONFIG_EAP_PROXY
 OBJS += ../src/eap_peer/eap_proxy_$(CONFIG_EAP_PROXY).o
-include eap_proxy_$(CONFIG_EAP_PROXY).mk
+include eap_proxy_$(CONFIG_EAP_PROXY).mak
 CONFIG_IEEE8021X_EAPOL=y
 endif
 
@@ -613,10 +617,6 @@ NEED_SHA256=y
 endif
 
 ifdef CONFIG_WPS
-ifdef CONFIG_WPS2
-CFLAGS += -DCONFIG_WPS2
-endif
-
 # EAP-WSC
 CFLAGS += -DCONFIG_WPS -DEAP_WSC
 OBJS += wps_supplicant.o
@@ -741,6 +741,19 @@ ifdef CONFIG_DYNAMIC_EAP_METHODS
 CFLAGS += -DCONFIG_DYNAMIC_EAP_METHODS
 LIBS += -ldl -rdynamic
 endif
+endif
+
+ifdef CONFIG_MACSEC
+CFLAGS += -DCONFIG_MACSEC
+NEED_AES_ENCBLOCK=y
+NEED_AES_UNWRAP=y
+NEED_AES_WRAP=y
+NEED_AES_OMAC1=y
+OBJS += wpas_kay.o
+OBJS += ../src/pae/ieee802_1x_cp.o
+OBJS += ../src/pae/ieee802_1x_kay.o
+OBJS += ../src/pae/ieee802_1x_key.o
+OBJS += ../src/pae/ieee802_1x_secy_ops.o
 endif
 
 ifdef CONFIG_AP
@@ -958,7 +971,8 @@ endif
 OBJS += ../src/crypto/crypto_gnutls.o
 OBJS_p += ../src/crypto/crypto_gnutls.o
 ifdef NEED_FIPS186_2_PRF
-OBJS += ../src/crypto/fips_prf_gnutls.o
+OBJS += ../src/crypto/fips_prf_internal.o
+SHA1OBJS += ../src/crypto/sha1-internal.o
 endif
 LIBS += -lgcrypt
 LIBS_p += -lgcrypt
@@ -974,7 +988,8 @@ endif
 OBJS += ../src/crypto/crypto_cryptoapi.o
 OBJS_p += ../src/crypto/crypto_cryptoapi.o
 ifdef NEED_FIPS186_2_PRF
-OBJS += ../src/crypto/fips_prf_cryptoapi.o
+OBJS += ../src/crypto/fips_prf_internal.o
+SHA1OBJS += ../src/crypto/sha1-internal.o
 endif
 CONFIG_INTERNAL_SHA256=y
 CONFIG_INTERNAL_RC4=y
@@ -989,7 +1004,8 @@ endif
 OBJS += ../src/crypto/crypto_nss.o
 OBJS_p += ../src/crypto/crypto_nss.o
 ifdef NEED_FIPS186_2_PRF
-OBJS += ../src/crypto/fips_prf_nss.o
+OBJS += ../src/crypto/fips_prf_internal.o
+SHA1OBJS += ../src/crypto/sha1-internal.o
 endif
 LIBS += -lnss3
 LIBS_p += -lnss3
@@ -1259,6 +1275,11 @@ endif
 ifeq ($(CONFIG_CTRL_IFACE), udp)
 CFLAGS += -DCONFIG_CTRL_IFACE_UDP
 endif
+ifeq ($(CONFIG_CTRL_IFACE), udp6)
+CONFIG_CTRL_IFACE=udp
+CFLAGS += -DCONFIG_CTRL_IFACE_UDP
+CFLAGS += -DCONFIG_CTRL_IFACE_UDP_IPV6
+endif
 ifeq ($(CONFIG_CTRL_IFACE), named_pipe)
 CFLAGS += -DCONFIG_CTRL_IFACE_NAMED_PIPE
 endif
@@ -1266,6 +1287,12 @@ ifeq ($(CONFIG_CTRL_IFACE), udp-remote)
 CONFIG_CTRL_IFACE=udp
 CFLAGS += -DCONFIG_CTRL_IFACE_UDP
 CFLAGS += -DCONFIG_CTRL_IFACE_UDP_REMOTE
+endif
+ifeq ($(CONFIG_CTRL_IFACE), udp6-remote)
+CONFIG_CTRL_IFACE=udp
+CFLAGS += -DCONFIG_CTRL_IFACE_UDP
+CFLAGS += -DCONFIG_CTRL_IFACE_UDP_REMOTE
+CFLAGS += -DCONFIG_CTRL_IFACE_UDP_IPV6
 endif
 OBJS += ctrl_iface.o ctrl_iface_$(CONFIG_CTRL_IFACE).o
 endif
@@ -1462,6 +1489,16 @@ endif
 ifdef NEED_OFFCHANNEL
 OBJS += offchannel.o
 CFLAGS += -DCONFIG_OFFCHANNEL
+endif
+
+ifdef CONFIG_MODULE_TESTS
+CFLAGS += -DCONFIG_MODULE_TESTS
+OBJS += wpas_module_tests.o
+OBJS += ../src/utils/utils_module_tests.o
+OBJS += ../src/common/common_module_tests.o
+ifdef CONFIG_WPS
+OBJS += ../src/wps/wps_module_tests.o
+endif
 endif
 
 OBJS += ../src/drivers/driver_common.o
