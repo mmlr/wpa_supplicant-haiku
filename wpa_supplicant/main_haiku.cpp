@@ -431,7 +431,8 @@ WPASupplicantApp::_JoinNetwork(BMessage *message)
 
 		interfaceOptions.ifname = interfaceName;
 
-		interface = wpa_supplicant_add_iface(fWPAGlobal, &interfaceOptions);
+		interface = wpa_supplicant_add_iface(fWPAGlobal, &interfaceOptions,
+			NULL);
 		if (interface == NULL)
 			return B_NO_MEMORY;
 	} else {
